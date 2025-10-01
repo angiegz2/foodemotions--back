@@ -1,10 +1,13 @@
 const express = require('express');
-const { registerUser, loginUser } = require('../controllers/authController');
+const passport = require('passport');
 const { body } = require('express-validator');
-const { isAuthenticated } = require('../middlewares/authMiddleware'); // Middleware de autenticación
+const { registerUser, loginUser } = require('../controllers/authController');
+const { ensureAuthenticated } = require('../middleware/authMiddleware'); 
+
 const router = express.Router();
 
-// Validaciones de datos de entrada
+
+// Registro manual
 router.post('/signup', 
   [
     body('email').isEmail().withMessage('Debe ser un correo válido'),
@@ -13,6 +16,7 @@ router.post('/signup',
   registerUser
 );
 
+// Login manual
 router.post('/login', 
   [
     body('email').isEmail().withMessage('Debe ser un correo válido'),
@@ -21,8 +25,27 @@ router.post('/login',
   loginUser
 );
 
-// Ejemplo de una ruta protegida
-router.get('/protected', isAuthenticated, (req, res) => {
+// Login con Google
+router.get('/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+
+// Callback de Google
+router.get('/google/callback', 
+  passport.authenticate('google', { failureRedirect: '/login' }),
+  (req, res) => {
+    res.redirect('http://localhost:4321/Profile'); 
+  }
+);
+
+// Logout
+router.post('/logout', (req, res, next) => {
+  req.logout((err) => {
+    if (err) return next(err);
+    res.json({ message: 'Sesión cerrada correctamente' });
+  });
+});
+
+// Ejemplo de ruta protegida
+router.get('/protected', ensureAuthenticated, (req, res) => {
   res.json({ message: 'Acceso concedido a una ruta protegida' });
 });
 

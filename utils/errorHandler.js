@@ -1,4 +1,4 @@
-exports.errorHandler = (err, req, res, next) => {
-    res.status(500).json({ message: err.message || 'Server Error' });
-  };
-  
+exports.handleError = (res, error, message = 'Error en el servidor') => {
+  console.error(error);
+  res.status(500).json({ message, error: error.message });
+};
