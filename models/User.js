@@ -2,25 +2,29 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
 const userSchema = new mongoose.Schema({
-  googleId: { type: String }, // Para login con Google (opcional)
-  username: { type: String }, // Nombre de usuario general
+  googleId: { type: String },
+  username: { type: String },
   firstName: { type: String },
   lastName: { type: String },
-  email: { 
-    type: String, 
-    required: true, 
-    unique: true, 
-    match: /.+\@.+\..+/ 
-  }, 
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    match: /.+\@.+\..+/
+  },
   phone: { type: String },
-  password: { type: String }, // será requerido solo en registro manual
-  profilePic: { type: String },
-  bio: { type: String },
-  status: { type: String, default: 'Offline' },
+  password: { type: String },
+  profilePic: { type: String, default: '/default-avatar.png' },
+  bio: { type: String, default: '' },
+  status: { type: String, default: 'Online' },
+
+  // 🔹 Nuevos campos para el perfil
+  followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 }, { timestamps: true });
 
-// Hash de la contraseña antes de guardar
-userSchema.pre('save', async function(next) {
+// Hash automático
+userSchema.pre('save', async function (next) {
   if (!this.isModified('password') || !this.password) return next();
   try {
     const salt = await bcrypt.genSalt(10);
@@ -31,11 +35,11 @@ userSchema.pre('save', async function(next) {
   }
 });
 
-// Método para comparar contraseñas
-userSchema.methods.comparePassword = async function(password) {
-  if (!this.password) return false; // usuario creado con Google no tiene pass
+userSchema.methods.comparePassword = async function (password) {
+  if (!this.password) return false;
   return await bcrypt.compare(password, this.password);
 };
 
 module.exports = mongoose.model('User', userSchema);
+
 

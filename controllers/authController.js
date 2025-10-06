@@ -1,17 +1,65 @@
 const User = require('../models/User');
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 
-exports.register = async (req, res) => {
+// 🔹 Registro manual
+exports.registerUser = async (req, res) => {
   try {
-    const { username, email, password } = req.body;
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = await User.create({ username, email, password: hashedPassword });
-    res.status(201).json(newUser);
+    const { username, email, phone, password } = req.body;
+
+    // Validar si ya existe
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ message: 'El usuario ya existe.' });
+    }
+
+    // Crear y guardar usuario
+    const newUser = new User({ username, email, phone, password });
+    await newUser.save();
+
+    // Generar token JWT
+    const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
+
+    res.status(201).json({
+      message: 'Usuario registrado correctamente',
+      user: newUser,
+      token
+    });
   } catch (err) {
-    res.status(500).json({ message: 'Error al registrar usuario', error: err.message });
+    console.error('Error al registrar usuario:', err);
+    res.status(500).json({ message: 'Error del servidor', error: err.message });
   }
 };
 
-exports.login = async (req, res) => {
-  res.json({ message: 'Inicio de sesión exitoso', user: req.user });
+// 🔹 Inicio de sesión manual
+exports.loginUser = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Verificar usuario
+    const user = await User.findOne({ email });
+    if (!user)
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+
+    // Comparar contraseñas
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch)
+      return res.status(401).json({ message: 'Contraseña incorrecta' });
+
+    // Generar token
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
+
+    res.status(200).json({
+      message: 'Inicio de sesión exitoso',
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email
+      },
+      token
+    });
+  } catch (err) {
+    console.error('Error en login:', err);
+    res.status(500).json({ message: 'Error del servidor', error: err.message });
+  }
 };

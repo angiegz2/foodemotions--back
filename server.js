@@ -1,4 +1,6 @@
-// Cargar dependencias principales
+// ============================================================
+// 🔹 Dependencias principales
+// ============================================================
 const express = require('express');
 const session = require('express-session');
 const passport = require('passport');
@@ -10,58 +12,89 @@ const bcrypt = require('bcrypt');
 const { body, validationResult } = require('express-validator');
 const morgan = require('morgan');
 const helmet = require('helmet');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
 
-// Cargar variables de entorno desde .env
+// ============================================================
+// 🔹 Cargar variables de entorno
+// ============================================================
 dotenv.config();
 
 const app = express();
 
-// Middleware para logging y cabeceras de seguridad
+// ============================================================
+// 🔹 Middlewares globales
+// ============================================================
 app.use(morgan('dev'));
-app.use(helmet());
+app.use(helmet({ crossOriginResourcePolicy: false }));
 
-// Configuración de CORS para permitir solicitudes desde el frontend
 app.use(cors({
-  origin: 'http://localhost:4321',
+  origin: process.env.CLIENT_URL || 'http://localhost:4321',
   credentials: true,
 }));
 
-// Habilitar el parseo de JSON y datos de formularios
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Conectar a MongoDB utilizando una URI configurable
+// ============================================================
+// 🔹 Conexión a MongoDB
+// ============================================================
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/mi_base_de_datos';
-mongoose.connect(mongoUri, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-  .then(() => console.log('Conexión exitosa a MongoDB'))
-  .catch(err => console.error('Error conectando a MongoDB', err));
+mongoose.connect(mongoUri)
+  .then(() => console.log('✅ Conexión exitosa a MongoDB'))
+  .catch(err => console.error('❌ Error conectando a MongoDB:', err));
 
-// Definir esquemas y modelos de Mongoose
+// ============================================================
+// 🔹 Configuración de Cloudinary (para subir imágenes reales)
+// ============================================================
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const storage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'profile_pics',
+    allowed_formats: ['jpg', 'jpeg', 'png'],
+  },
+});
+
+const upload = multer({ storage });
+
+// ============================================================
+// 🔹 Esquemas y modelos de Mongoose
+// ============================================================
 const usuarioSchema = new mongoose.Schema({
   googleId: String,
   username: String,
   email: { type: String, required: true, unique: true },
   telefono: String,
-  password: { type: String, required: false },
+  password: { type: String },
   profilePic: String,
   bio: String,
-  status: String,
+  status: { type: String, default: 'Offline' },
+  followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 });
-const Usuario = mongoose.model('user', usuarioSchema);
+
+const Usuario = mongoose.model('User', usuarioSchema);
 
 const recipeSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  description: { type: String, required: true },
-  ingredients: { type: [String], required: true },
-  steps: { type: [String], required: true },
+  name: String,
+  description: String,
+  ingredients: [String],
+  steps: [String],
   rating: { type: Number, min: 0, max: 5 },
 });
+
 const Recipe = mongoose.model('Recipe', recipeSchema);
 
-// Configuración de sesiones. Utilizamos variables de entorno para la clave secreta
+// ============================================================
+// 🔹 Configuración de sesiones (para Google OAuth)
+// ============================================================
 app.use(session({
   secret: process.env.SESSION_SECRET || 'change-me-secret',
   resave: false,
@@ -73,34 +106,37 @@ app.use(session({
   },
 }));
 
-// Inicializar Passport y sesiones
+// ============================================================
+// 🔹 Configurar Passport (Google OAuth)
+// ============================================================
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Estrategia de autenticación con Google OAuth2
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  callbackURL: 'http://localhost:3000/auth/google/callback',
-}, async (accessToken, refreshToken, profile, done) => {
-  try {
-    let user = await Usuario.findOne({ googleId: profile.id });
-    if (!user) {
-      user = new Usuario({
-        googleId: profile.id,
-        username: profile.displayName,
-        email: profile.emails[0].value,
-        profilePic: profile._json.picture,
-        bio: '',
-        status: 'Online',
-      });
-      await user.save();
+  callbackURL: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:3000/auth/google/callback',
+},
+  async (accessToken, refreshToken, profile, done) => {
+    try {
+      let user = await Usuario.findOne({ googleId: profile.id });
+      if (!user) {
+        user = new Usuario({
+          googleId: profile.id,
+          username: profile.displayName,
+          email: profile.emails[0].value,
+          profilePic: profile._json.picture,
+          bio: '',
+          status: 'Online',
+        });
+        await user.save();
+      }
+      return done(null, user);
+    } catch (err) {
+      return done(err, null);
     }
-    return done(null, user);
-  } catch (err) {
-    return done(err);
   }
-}));
+));
 
 passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
@@ -108,23 +144,45 @@ passport.deserializeUser(async (id, done) => {
     const user = await Usuario.findById(id);
     done(null, user);
   } catch (err) {
-    done(err);
+    done(err, null);
   }
 });
 
-// Middleware de autenticación para proteger rutas
+// ============================================================
+// 🔹 Middleware de autenticación
+// ============================================================
 function ensureAuthenticated(req, res, next) {
-  if (req.isAuthenticated()) {
-    return next();
-  }
-  res.status(401).json({ message: 'No autorizado, por favor inicia sesión' });
+  if (req.isAuthenticated()) return next();
+  return res.status(401).json({ message: 'No autorizado, por favor inicia sesión' });
 }
 
-// Ruta de perfil de usuario autenticado
+// ============================================================
+// 🔹 Rutas de autenticación
+// ============================================================
+app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+
+app.get('/auth/google/callback',
+  passport.authenticate('google', { failureRedirect: '/login' }),
+  (req, res) => res.redirect(`${process.env.CLIENT_URL}/Profile`)
+);
+
+app.post('/logout', (req, res) => {
+  req.logout(err => {
+    if (err) return res.status(500).json({ message: 'Error cerrando sesión' });
+    res.sendStatus(200);
+  });
+});
+
+// ============================================================
+// 🔹 Perfil de usuario autenticado
+// ============================================================
 app.get('/profile-data', ensureAuthenticated, async (req, res) => {
   try {
-    const user = await Usuario.findById(req.user.id);
-    if (!user) return res.status(404).json({ message: 'Usuario no encontrado.' });
+    const user = await Usuario.findById(req.user.id)
+      .populate('followers', 'username profilePic')
+      .populate('following', 'username profilePic');
+    if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
+
     res.json({
       profilePic: user.profilePic || '',
       userName: user.username || '',
@@ -132,127 +190,228 @@ app.get('/profile-data', ensureAuthenticated, async (req, res) => {
       phone: user.telefono || '',
       status: user.status || 'Offline',
       bio: user.bio || '',
-      interactionHistory: 'Sin interacciones recientes',
-      preferences: {
-        interests: ['AI', 'Technology'],
-        notifications: true,
-        language: 'es',
-      },
+      followers: user.followers || [],
+      following: user.following || [],
     });
-  } catch (error) {
-    console.error('Error obteniendo los datos del perfil:', error);
-    res.status(500).json({ message: 'Error al obtener los datos del perfil.' });
+  } catch (err) {
+    console.error('Error obteniendo perfil:', err);
+    res.status(500).json({ message: 'Error obteniendo perfil' });
   }
 });
 
-// Rutas de autenticación con Google
-app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
-app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/login' }), (req, res) => {
-  res.redirect('http://localhost:4321/Profile');
-});
-
-// Inicio de sesión manual con email y contraseña
-app.post('/login', async (req, res) => {
-  const { email, password } = req.body;
+// ============================================================
+// 🔹 Actualizar información del perfil
+// ============================================================
+app.put('/profile/update', ensureAuthenticated, async (req, res) => {
   try {
-    const user = await Usuario.findOne({ email });
-    if (!user) {
-      return res.status(400).json({ message: 'Usuario no encontrado.' });
-    }
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).json({ message: 'Contraseña incorrecta.' });
-    }
-    req.login(user, (err) => {
-      if (err) return res.status(500).json({ message: 'Error al iniciar sesión.' });
-      return res.status(200).json({ message: 'Inicio de sesión exitoso.' });
-    });
+    const { username, telefono } = req.body;
+    const user = await Usuario.findByIdAndUpdate(
+      req.user.id,
+      { username, telefono },
+      { new: true }
+    );
+    res.json({ message: 'Perfil actualizado correctamente', user });
   } catch (error) {
-    console.error('Error en el login:', error);
-    res.status(500).json({ message: 'Error al iniciar sesión.' });
+    console.error('Error actualizando perfil:', error);
+    res.status(500).json({ message: 'Error al actualizar el perfil.' });
   }
 });
 
-// Cerrar sesión
-app.post('/logout', (req, res) => {
-  req.logout((err) => {
-    if (err) return res.status(500).json({ message: 'Error cerrando sesión' });
-    res.sendStatus(200);
-  });
-});
-
-// Registro de usuarios manual
-app.post('/sign-up', [
-  body('username').notEmpty().withMessage('El nombre de usuario es obligatorio.'),
-  body('email').isEmail().withMessage('Debes proporcionar un correo electrónico válido.'),
-  body('telefono').notEmpty().withMessage('El teléfono es obligatorio.'),
-  body('password').isLength({ min: 6 }).withMessage('La contraseña debe tener al menos 6 caracteres.'),
-  body('confirmPassword').custom((value, { req }) => {
-    if (value !== req.body.password) {
-      throw new Error('Las contraseñas no coinciden.');
-    }
-    return true;
-  }),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-  const { username, email, telefono, password } = req.body;
+// ============================================================
+// 🔹 Actualizar estado
+// ============================================================
+app.put('/profile/status', ensureAuthenticated, async (req, res) => {
   try {
-    const usuarioExistente = await Usuario.findOne({ email });
-    if (usuarioExistente) {
-      return res.status(400).json({ message: 'El correo electrónico ya está registrado.' });
-    }
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const nuevoUsuario = new Usuario({
-      googleId: null,
-      username,
-      email,
-      telefono,
-      password: hashedPassword,
-      profilePic: '',
-      bio: '',
-      status: 'Offline',
-    });
-    await nuevoUsuario.save();
-    res.status(201).json({ message: 'Usuario registrado correctamente.' });
+    const { status } = req.body;
+    const user = await Usuario.findByIdAndUpdate(req.user.id, { status }, { new: true });
+    res.json({ message: 'Estado actualizado correctamente', status: user.status });
   } catch (error) {
-    console.error('Error guardando el usuario:', error);
-    res.status(500).json({ message: 'Error guardando el usuario.', error: error.message });
+    console.error('Error actualizando estado:', error);
+    res.status(500).json({ message: 'Error al actualizar el estado.' });
   }
 });
 
-// Rutas de recetas
-// Obtener todas las recetas
+// ============================================================
+// 🔹 Actualizar biografía
+// ============================================================
+app.put('/profile/bio', ensureAuthenticated, async (req, res) => {
+  try {
+    const { bio } = req.body;
+    const user = await Usuario.findByIdAndUpdate(req.user.id, { bio }, { new: true });
+    res.json({ message: 'Biografía actualizada correctamente', bio: user.bio });
+  } catch (error) {
+    console.error('Error actualizando biografía:', error);
+    res.status(500).json({ message: 'Error al actualizar biografía.' });
+  }
+});
+
+// ============================================================
+// 🔹 Subir o cambiar foto de perfil (Cloudinary)
+// ============================================================
+app.post('/profile/upload', ensureAuthenticated, upload.single('profilePic'), async (req, res) => {
+  try {
+    const user = await Usuario.findByIdAndUpdate(
+      req.user.id,
+      { profilePic: req.file.path },
+      { new: true }
+    );
+    res.json({ message: 'Foto de perfil actualizada', profilePic: user.profilePic });
+  } catch (error) {
+    console.error('Error subiendo imagen:', error);
+    res.status(500).json({ message: 'Error al subir la imagen.' });
+  }
+});
+
+// ============================================================
+// 🔹 Seguir / dejar de seguir usuarios
+// ============================================================
+app.post('/profile/follow/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const userToFollow = await Usuario.findById(req.params.id);
+    const currentUser = await Usuario.findById(req.user.id);
+    if (!userToFollow) return res.status(404).json({ message: 'Usuario no encontrado.' });
+    if (userToFollow.id === currentUser.id) return res.status(400).json({ message: 'No puedes seguirte a ti mismo.' });
+
+    if (!currentUser.following.includes(userToFollow.id)) {
+      currentUser.following.push(userToFollow.id);
+      userToFollow.followers.push(currentUser.id);
+      await currentUser.save();
+      await userToFollow.save();
+    }
+    res.json({ message: `Ahora sigues a ${userToFollow.username}` });
+  } catch (error) {
+    console.error('Error al seguir usuario:', error);
+    res.status(500).json({ message: 'Error al seguir usuario.' });
+  }
+});
+
+app.post('/profile/unfollow/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const userToUnfollow = await Usuario.findById(req.params.id);
+    const currentUser = await Usuario.findById(req.user.id);
+    if (!userToUnfollow) return res.status(404).json({ message: 'Usuario no encontrado.' });
+
+    currentUser.following = currentUser.following.filter(u => u.toString() !== userToUnfollow.id);
+    userToUnfollow.followers = userToUnfollow.followers.filter(u => u.toString() !== currentUser.id);
+
+    await currentUser.save();
+    await userToUnfollow.save();
+    res.json({ message: `Has dejado de seguir a ${userToUnfollow.username}` });
+  } catch (error) {
+    console.error('Error al dejar de seguir usuario:', error);
+    res.status(500).json({ message: 'Error al dejar de seguir usuario.' });
+  }
+});
+
+// ============================================================
+// 🔹 Recetas
+// ============================================================
 app.get('/recipes', async (req, res) => {
   try {
     const recipes = await Recipe.find();
     res.json(recipes);
   } catch (err) {
-    console.error('Error obteniendo recetas:', err);
-    res.status(500).json({ message: 'Error al obtener recetas.', error: err.message });
+    res.status(500).json({ message: 'Error obteniendo recetas', error: err.message });
   }
 });
 
-// Crear una nueva receta
 app.post('/recipes', async (req, res) => {
   try {
     const { name, description, ingredients, steps, rating } = req.body;
-    if (!name || !description || !ingredients || !steps) {
+    if (!name || !description || !ingredients || !steps)
       return res.status(400).json({ message: 'Todos los campos son obligatorios.' });
-    }
+
     const newRecipe = new Recipe({ name, description, ingredients, steps, rating });
     await newRecipe.save();
     res.status(201).json({ message: 'Receta creada', recipe: newRecipe });
   } catch (err) {
-    console.error('Error creando receta:', err);
-    res.status(500).json({ message: 'Error al crear la receta', error: err.message });
+    res.status(500).json({ message: 'Error creando receta', error: err.message });
   }
 });
 
-// Levantar el servidor
+// ============================================================
+// 🔹 Registro manual
+// ============================================================
+app.post('/sign-up', [
+  body('username').notEmpty().withMessage('El nombre de usuario es obligatorio.'),
+  body('email').isEmail().withMessage('Correo electrónico inválido.'),
+  body('telefono').notEmpty().withMessage('El teléfono es obligatorio.'),
+  body('password').isLength({ min: 6 }).withMessage('Mínimo 6 caracteres.'),
+  body('confirmPassword').custom((value, { req }) => {
+    if (value !== req.body.password) throw new Error('Las contraseñas no coinciden.');
+    return true;
+  }),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  try {
+    const { username, email, telefono, password } = req.body;
+    const existingUser = await Usuario.findOne({ email });
+    if (existingUser) return res.status(400).json({ message: 'El correo ya está registrado.' });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new Usuario({
+      username,
+      email,
+      telefono,
+      password: hashedPassword,
+      status: 'Offline',
+    });
+
+    await newUser.save();
+    res.status(201).json({ message: 'Usuario registrado correctamente.' });
+  } catch (err) {
+    console.error('Error registrando usuario:', err);
+    res.status(500).json({ message: 'Error registrando usuario.' });
+  }
+});
+
+// ============================================================
+// 🔹 Login manual (actualizado)
+// ============================================================
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    const user = await Usuario.findOne({ email });
+    if (!user) {
+      return res.status(400).json({ message: 'Usuario no encontrado.' });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password || '');
+    if (!isMatch) {
+      return res.status(400).json({ message: 'Contraseña incorrecta.' });
+    }
+
+    // Inicia sesión con Passport
+    req.login(user, (err) => {
+      if (err) {
+        console.error('Error iniciando sesión:', err);
+        return res.status(500).json({ message: 'Error al iniciar sesión.' });
+      }
+
+      // ✅ Enviar redirección manual al frontend
+      return res.status(200).json({
+        message: 'Inicio de sesión exitoso.',
+        redirectUrl: `${process.env.CLIENT_URL}/Profile`, // Redirige al perfil del usuario
+        user: {
+          username: user.username,
+          email: user.email,
+          profilePic: user.profilePic,
+        },
+      });
+    });
+  } catch (err) {
+    console.error('Error en login:', err);
+    res.status(500).json({ message: 'Error al iniciar sesión.' });
+  }
+});
+
+// ============================================================
+// 🔹 Iniciar servidor
+// ============================================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en http://localhost:${PORT}`);
+  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
 });
