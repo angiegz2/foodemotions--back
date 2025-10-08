@@ -15,6 +15,8 @@ const helmet = require('helmet');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+
 
 // ============================================================
 // 🔹 Cargar variables de entorno
@@ -448,6 +450,71 @@ app.post('/login', async (req, res) => {
   } catch (err) {
     console.error('Error en login:', err);
     res.status(500).json({ message: 'Error al iniciar sesión.' });
+  }
+});
+
+// ============================================================
+// 🔹 🔥 RUTAS Chat Roy con Hugging Face (corregidas)
+// ============================================================
+
+const HF_API_URL = "https://api-inference.huggingface.co/models/facebook/blenderbot-400M-distill";
+const HF_TOKEN = process.env.HF_API_TOKEN; 
+
+// GET informativo (para que no salga "Cannot GET")
+app.get("/api/chat", (req, res) => {
+  res.status(200).send("✅ Usa POST /api/chat con JSON { message: '...' }");
+});
+
+// POST real del chatbot
+app.post("/api/chat", async (req, res) => {
+  try {
+    if (!HF_TOKEN) {
+      return res.status(500).json({ error: "Falta HF_API_TOKEN en .env" });
+    }
+
+    const { message } = req.body || {};
+    if (typeof message !== "string" || !message.trim()) {
+      return res.status(400).json({ error: "Mensaje vacío" });
+    }
+
+    const response = await fetch(HF_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${HF_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ inputs: message }),
+    });
+
+    // La Inference API a veces devuelve 503 mientras carga el modelo
+    if (!response.ok) {
+      const text = await response.text();
+      return res.status(response.status).json({ error: "HF error", details: text });
+    }
+
+    const data = await response.json();
+// Primero intenta usar data[0].generated_text
+let reply = null;
+if (Array.isArray(data) && data.length > 0 && typeof data[0].generated_text === "string") {
+  reply = data[0].generated_text;
+} else if (typeof data.generated_text === "string") {
+  reply = data.generated_text;
+} else if (typeof data[0]?.generated_text === "string") {
+  reply = data[0].generated_text;
+} else {
+  // Trata de otros campos posibles
+  if (data[0]?.generated_text) reply = data[0].generated_text;
+  else if (data.generated_text) reply = data.generated_text;
+}
+// Si no encontró respuesta válida
+if (!reply) {
+  reply = "Lo siento, no pude entender eso. ¿Podrías reformularlo?";
+}
+res.json({ reply });
+
+  } catch (err) {
+    console.error("❌ Error en /api/chat:", err);
+    return res.status(500).json({ error: "Error conectando con Hugging Face API" });
   }
 });
 
