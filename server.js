@@ -46,22 +46,36 @@ mongoose.connect(mongoUri)
   .catch(err => console.error('❌ Error conectando a MongoDB:', err));
 
 // ============================================================
-// 🔹 Configuración de Cloudinary (para subir imágenes reales)
+// 🔹 Configuración de Cloudinary y Multer
 // ============================================================
+
+// Cargar configuración de Cloudinary desde .env
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
+// Verificar configuración
+if (!process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) {
+  console.error('❌ Error: Faltan las variables de entorno de Cloudinary en el archivo .env');
+} else {
+  console.log('✅ Cloudinary configurado correctamente');
+}
+
+// Configurar almacenamiento en Cloudinary
 const storage = new CloudinaryStorage({
   cloudinary,
   params: {
-    folder: 'profile_pics',
+    folder: process.env.CLOUDINARY_FOLDER || 'profile_pics',
     allowed_formats: ['jpg', 'jpeg', 'png'],
+    transformation: [
+      { width: 300, height: 300, crop: 'fill', gravity: 'face' }, // Recorte automático al rostro
+    ],
   },
 });
 
+// Inicializar multer con ese storage
 const upload = multer({ storage });
 
 // ============================================================
@@ -166,6 +180,11 @@ app.get('/auth/google/callback',
   (req, res) => res.redirect(`${process.env.CLIENT_URL}/Profile`)
 );
 
+// 🔹 Verificar estado de sesión
+app.get('/auth/status', (req, res) => {
+  res.json({ loggedIn: !!req.user });
+});
+
 app.post('/logout', (req, res) => {
   req.logout(err => {
     if (err) return res.status(500).json({ message: 'Error cerrando sesión' });
@@ -184,7 +203,7 @@ app.get('/profile-data', ensureAuthenticated, async (req, res) => {
     if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
 
     res.json({
-      profilePic: user.profilePic || '',
+      profilePic: user.profilePic || null,
       userName: user.username || '',
       email: user.email || '',
       phone: user.telefono || '',
@@ -248,16 +267,40 @@ app.put('/profile/bio', ensureAuthenticated, async (req, res) => {
 // ============================================================
 // 🔹 Subir o cambiar foto de perfil (Cloudinary)
 // ============================================================
-app.post('/profile/upload', ensureAuthenticated, upload.single('profilePic'), async (req, res) => {
+app.post('/profile/upload', upload.single('profilePic'), async (req, res) => {
   try {
-    const user = await Usuario.findByIdAndUpdate(
+    // Verificamos autenticación
+    if (!req.user) {
+      return res.status(401).json({ message: 'No autorizado. Inicia sesión.' });
+    }
+
+    // Si no hay archivo
+    if (!req.file || !req.file.path) {
+      return res.status(400).json({ message: 'No se recibió ninguna imagen.' });
+    }
+
+    // ✅ Usar el enlace público de Cloudinary
+    const imageUrl = req.file.path || req.file.secure_url;
+
+    // ✅ Actualizar el usuario autenticado
+    const updatedUser = await Usuario.findByIdAndUpdate(
       req.user.id,
-      { profilePic: req.file.path },
+      { profilePic: imageUrl },
       { new: true }
     );
-    res.json({ message: 'Foto de perfil actualizada', profilePic: user.profilePic });
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'Usuario no encontrado.' });
+    }
+
+    console.log('✅ Foto de perfil actualizada en la BD:', updatedUser.profilePic);
+
+    res.json({
+      message: 'Foto de perfil actualizada correctamente.',
+      profilePic: updatedUser.profilePic,
+    });
   } catch (error) {
-    console.error('Error subiendo imagen:', error);
+    console.error('❌ Error al subir imagen:', error);
     res.status(500).json({ message: 'Error al subir la imagen.' });
   }
 });
