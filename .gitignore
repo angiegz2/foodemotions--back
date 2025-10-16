@@ -2,6 +2,7 @@
 .env
 # Node modules
 node_modules/
+models_cache/
 
 # Logs
 logs
