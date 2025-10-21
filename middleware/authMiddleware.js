@@ -1,36 +1,35 @@
-const jwt = require('jsonwebtoken');
+// middleware/authMiddleware.js
+import jwt from "jsonwebtoken";
 
 /**
- * Middleware para verificar el token JWT en peticiones protegidas
- * (para usuarios registrados manualmente).
+ * ✅ Middleware para verificar el token JWT en rutas protegidas
+ * (para Users registrados manualmente).
  */
-exports.verifyToken = (req, res, next) => {
-  // Buscar el token en los encabezados
+export function verifyToken(req, res, next) {
   const authHeader = req.headers.authorization;
-  const token = authHeader?.split(' ')[1];
+  const token = authHeader?.split(" ")[1];
 
   if (!token) {
-    return res.status(401).json({ message: 'Acceso denegado. Token no proporcionado.' });
+    return res.status(401).json({ message: "Acceso denegado. Token no proporcionado." });
   }
 
   try {
-    // Verificar y decodificar token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded; // guardar datos del usuario en la request
+    req.user = decoded; // guarda los datos del User en la request
     next();
   } catch (err) {
-    console.error('❌ Error al verificar token:', err);
-    return res.status(403).json({ message: 'Token inválido o expirado.' });
+    console.error("❌ Error al verificar token:", err);
+    return res.status(403).json({ message: "Token inválido o expirado." });
   }
-};
+}
 
 /**
- * Middleware para proteger rutas basadas en sesiones de Passport
- * (para usuarios autenticados con Google OAuth).
+ * ✅ Middleware para proteger rutas con sesiones de Passport
+ * (para Users autenticados con Google OAuth).
  */
-exports.ensureAuthenticated = (req, res, next) => {
+export function ensureAuthenticated(req, res, next) {
   if (req.isAuthenticated && req.isAuthenticated()) {
     return next();
   }
-  return res.status(401).json({ message: 'No autorizado, por favor inicia sesión.' });
-};
+  return res.status(401).json({ message: "No autorizado, por favor inicia sesión." });
+}

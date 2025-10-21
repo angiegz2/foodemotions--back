@@ -45,7 +45,7 @@ router.get(
 );
 
 /* ============================================================
-   🟢 PERFIL DE USUARIO (JWT y GOOGLE)
+   🟢 PERFIL DE User (JWT y GOOGLE)
    ============================================================ */
 // Perfil (login manual)
 router.get('/profile', verifyToken, async (req, res) => {
@@ -54,7 +54,7 @@ router.get('/profile', verifyToken, async (req, res) => {
       .select('-password')
       .populate('followers', 'username')
       .populate('likes', 'username');
-    if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
+    if (!user) return res.status(404).json({ message: 'User no encontrado' });
     res.json(user);
   } catch (error) {
     console.error('Error al obtener perfil:', error);

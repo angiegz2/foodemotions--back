@@ -4,8 +4,8 @@ const User = require('./models/User'); // tu modelo definido en user.js
 // Conectar a MongoDB
 mongoose.connect('mongodb://localhost:27017/mi_base_de_datos')
   .then(async () => {
-    // Crear un nuevo usuario
-    const nuevoUsuario = new User({
+    // Crear un nuevo User
+    const nuevoUser = new User({
       username: "prueba",
       firstName: "Test",
       lastName: "Ejemplo",
@@ -15,8 +15,8 @@ mongoose.connect('mongodb://localhost:27017/mi_base_de_datos')
     });
 
     // Guardar en la base
-    await nuevoUsuario.save();
-    console.log("✅ Usuario creado correctamente:", nuevoUsuario);
+    await nuevoUser.save();
+    console.log("✅ User creado correctamente:", nuevoUser);
 
     // Cerrar conexión
     mongoose.disconnect();

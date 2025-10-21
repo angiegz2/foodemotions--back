@@ -15,6 +15,8 @@ import { CloudinaryStorage } from 'multer-storage-cloudinary';
 import { pipeline, env } from "@xenova/transformers";
 import fs from "fs";
 import path from "path";
+import http from 'http';
+import { Server as SocketIOServer } from 'socket.io';
 
 dotenv.config();
 const app = express();
@@ -34,13 +36,17 @@ app.use(cors({
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Conexión a MongoDB
+// ============================================================
+// 🧩 CONEXIÓN A MONGODB
+// ============================================================
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/mi_base_de_datos';
 mongoose.connect(mongoUri)
   .then(() => console.log('✅ Conexión exitosa a MongoDB'))
   .catch(err => console.error('❌ Error conectando a MongoDB:', err));
 
-// Configuración Cloudinary
+// ============================================================
+// ☁️ CONFIGURACIÓN CLOUDINARY
+// ============================================================
 cloudinary.v2.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -63,47 +69,110 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage });
 
-// Modelos Mongoose
+// ============================================================
+// 📦 MODELOS MONGOOSE — FoodEmotions Social + Chat + IA
+// ============================================================
+
+// 🧍‍♂️ USUARIO
 const usuarioSchema = new mongoose.Schema({
   googleId: String,
-  username: String,
+  username: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   telefono: String,
   password: String,
-  profilePic: String,
-  bio: String,
-  status: { type: String, default: 'Offline' },
-  followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  profilePic: { type: String, default: "" },
+  bio: { type: String, default: "" },
+  status: { type: String, default: "Offline" },
+  followers: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+  following: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+  savedPosts: [{ type: mongoose.Schema.Types.ObjectId, ref: "Post" }],
+  recipesLiked: [{ type: mongoose.Schema.Types.ObjectId, ref: "Recipe" }],
+  isPremium: { type: Boolean, default: false },
 }, { timestamps: true });
 
-const Usuario = mongoose.model('User', usuarioSchema);
+const Usuario = mongoose.models.User || mongoose.model("User", usuarioSchema);
 
+// ==========================
+// 📦 MODELO: Post
+// ==========================
+const postSchema = new mongoose.Schema({
+  author: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  caption: { type: String, default: '' },
+  images: [String],
+  likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  comments: [{
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    text: String,
+    createdAt: { type: Date, default: Date.now }
+  }],
+  tags: [String],
+  location: String,
+  visibility: { type: String, enum: ['public', 'followers', 'private'], default: 'public' }
+}, { timestamps: true });
+
+const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
+
+// Cloudinary + Multer
+const postStorage = new CloudinaryStorage({
+  cloudinary: cloudinary.v2,
+  params: {
+    folder: process.env.CLOUDINARY_FOLDER_POSTS || 'posts',
+    allowed_formats: ['jpg','jpeg','png','webp'],
+    transformation: [{ width: 1280, height: 1280, crop: 'limit' }],
+  },
+});
+const uploadPostMedia = multer({ storage: postStorage });
+
+// 💬 COMENTARIOS
+const commentSchema = new mongoose.Schema({
+  postId: { type: mongoose.Schema.Types.ObjectId, ref: "Post", required: true },
+  author: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  text: { type: String, required: true },
+  likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+}, { timestamps: true });
+
+const Comment = mongoose.models.Comment || mongoose.model("Comment", commentSchema);
+
+// ❤️ LIKE (opcional — si quieres registrar eventos)
+const likeSchema = new mongoose.Schema({
+  postId: { type: mongoose.Schema.Types.ObjectId, ref: "Post" },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+}, { timestamps: true });
+
+const Like = mongoose.models.Like || mongoose.model("Like", likeSchema);
+
+// 🍳 RECETA
 const recipeSchema = new mongoose.Schema({
-  name: String,
+  name: { type: String, required: true },
   description: String,
   ingredients: [String],
   steps: [String],
   rating: { type: Number, min: 0, max: 5 },
+  author: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  image: String,
+  likes: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
 }, { timestamps: true });
 
-const Recipe = mongoose.model('Recipe', recipeSchema);
+const Recipe = mongoose.models.Recipe || mongoose.model("Recipe", recipeSchema);
 
+// 💬 CHAT (para el chatbot Roy o entre usuarios)
 const chatSessionSchema = new mongoose.Schema({
-  title: { type: String, default: 'Nueva conversación' },
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  title: { type: String, default: "Nueva conversación" },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   messages: [
     {
-      role: { type: String, enum: ['user', 'assistant'], required: true },
+      role: { type: String, enum: ["user", "assistant"], required: true },
       text: { type: String, required: true },
       ts: { type: Date, default: Date.now },
     }
   ],
 }, { timestamps: true });
 
-const ChatSession = mongoose.model('ChatSession', chatSessionSchema);
+const ChatSession = mongoose.models.ChatSession || mongoose.model("ChatSession", chatSessionSchema);
 
-// Sesión y Passport
+// ============================================================
+// 🔐 SESIONES Y AUTENTICACIÓN (Passport + Google)
+// ============================================================
 app.use(session({
   secret: process.env.SESSION_SECRET || 'change-me-secret',
   resave: false,
@@ -124,7 +193,14 @@ passport.use(new GoogleStrategy({
   callbackURL: process.env.GOOGLE_CALLBACK_URL || 'http://localhost:3000/auth/google/callback',
 }, async (accessToken, refreshToken, profile, done) => {
   try {
-    let user = await Usuario.findOne({ googleId: profile.id });
+    // Buscar por googleId O por email para evitar duplicados
+    let user = await Usuario.findOne({ 
+      $or: [
+        { googleId: profile.id },
+        { email: profile.emails?.[0]?.value }
+      ]
+    });
+    
     if (!user) {
       user = await Usuario.create({
         googleId: profile.id,
@@ -134,7 +210,13 @@ passport.use(new GoogleStrategy({
         bio: '',
         status: 'Online',
       });
+    } else if (!user.googleId) {
+      // Si existe por email pero no tiene googleId, actualizarlo
+      user.googleId = profile.id;
+      user.profilePic = user.profilePic || profile._json?.picture;
+      await user.save();
     }
+    
     done(null, user);
   } catch (err) {
     done(err, null);
@@ -156,7 +238,9 @@ function ensureAuthenticated(req, res, next) {
   return res.status(401).json({ message: 'No autorizado. Inicia sesión.' });
 }
 
-// Autenticación Google
+// ============================================================
+// 💬 RUTAS DE AUTENTICACIÓN GOOGLE
+// ============================================================
 app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
 
 app.get('/auth/google/callback',
@@ -175,30 +259,39 @@ app.post('/logout', (req, res) => {
   });
 });
 
-// Perfil de usuario
-app.get('/profile-data', ensureAuthenticated, async (req, res) => {
+// ============================================================
+// 👤 PERFIL DE USUARIO
+// ============================================================
+app.get('/profile-data', async (req, res) => {
   try {
-    const user = await Usuario.findById(req.user.id)
-      .populate('followers', 'username profilePic')
-      .populate('following', 'username profilePic');
-    if (!user) return res.status(404).json({ message: 'Usuario no encontrado' });
+    // Si hay usuario autenticado
+    if (req.user) {
+      const user = await Usuario.findById(req.user._id)
+        .select('username email telefono profilePic bio status followers following');
+      if (!user) return res.status(404).json({ message: 'Usuario no encontrado.' });
+      return res.json(user);
+    }
 
-    res.json({
-      profilePic: user.profilePic || null,
-      userName: user.username || '',
-      email: user.email || '',
-      phone: user.telefono || '',
-      status: user.status || 'Offline',
-      bio: user.bio || '',
-      followers: user.followers || [],
-      following: user.following || [],
+    // Si no hay sesión activa
+    return res.status(200).json({
+      username: '',
+      email: '',
+      telefono: '',
+      profilePic: '',
+      bio: '',
+      status: 'Offline',
+      followers: [],
+      following: [],
     });
   } catch (err) {
-    console.error('Error obteniendo perfil:', err);
-    res.status(500).json({ message: 'Error obteniendo perfil' });
+    console.error('❌ Error en /profile-data:', err);
+    res.status(500).json({ message: 'Error obteniendo datos de perfil.' });
   }
 });
 
+// ============================================================
+// 🔹 ACTUALIZACIÓN DE PERFIL
+// ============================================================
 app.put('/profile/update', ensureAuthenticated, async (req, res) => {
   try {
     const { username, telefono } = req.body;
@@ -236,6 +329,9 @@ app.put('/profile/bio', ensureAuthenticated, async (req, res) => {
   }
 });
 
+// ============================================================
+// 📸 SUBIR FOTO DE PERFIL
+// ============================================================
 app.post('/profile/upload', upload.single('profilePic'), async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ message: 'No autorizado. Inicia sesión.' });
@@ -253,7 +349,9 @@ app.post('/profile/upload', upload.single('profilePic'), async (req, res) => {
   }
 });
 
-// Seguir / dejar de seguir
+// ============================================================
+// 👥 SEGUIR / DEJAR DE SEGUIR USUARIOS
+// ============================================================
 app.post('/profile/follow/:id', ensureAuthenticated, async (req, res) => {
   try {
     const userToFollow = await Usuario.findById(req.params.id);
@@ -292,7 +390,9 @@ app.post('/profile/unfollow/:id', ensureAuthenticated, async (req, res) => {
   }
 });
 
-// Recetas
+// ============================================================
+// 🍳 RECETAS
+// ============================================================
 app.get('/recipes', async (req, res) => {
   try {
     const recipes = await Recipe.find();
@@ -317,30 +417,15 @@ app.post('/recipes', async (req, res) => {
 });
 
 // ============================================================
-// 🔊 MODELO DE VOZ (Text-to-Speech)
+// 🤖 MODELOS DE IA (Chat, Traducción y Voz)
 // ============================================================
-
-let ttsPipeline = null;
-
-(async () => {
-  try {
-    console.log("Cargando modelo de voz (SpeechT5-TTS)...");
-    ttsPipeline = await pipeline("text-to-speech", "Xenova/speecht5_tts", {
-      vocoder: "Xenova/unet_vocoder",
-    });
-    console.log("✅ Modelo de voz cargado correctamente.");
-  } catch (err) {
-    console.error("❌ Error cargando modelo de voz:", err.message);
-  }
-})();
-
-// Configuración modelos de IA
 env.cacheDir = "./models_cache";
 env.allowLocalModels = true;
 env.useBrowserCache = false;
 
 let chatPipeline = null;
 let translatePipeline = null;
+let ttsPipeline = null;
 
 (async () => {
   try {
@@ -357,6 +442,12 @@ let translatePipeline = null;
       "Xenova/nllb-200-distilled-600M"
     );
     console.log("✅ Modelo de traducción cargado correctamente.");
+
+    console.log("Cargando modelo de voz (SpeechT5-TTS)...");
+    ttsPipeline = await pipeline("text-to-speech", "Xenova/speecht5_tts", {
+      vocoder: "Xenova/unet_vocoder",
+    });
+    console.log("✅ Modelo de voz cargado correctamente.");
   } catch (err) {
     console.error("❌ Error inicializando modelos:", err.message);
   }
@@ -446,7 +537,9 @@ async function generateSpanishReply({ message, mode, history = [] }) {
   }
 }
 
-// Endpoints de chat
+// ============================================================
+// 💬 ENDPOINTS DE CHAT
+// ============================================================
 app.post("/api/chat", async (req, res) => {
   try {
     if (!chatPipeline || !translatePipeline) {
@@ -486,10 +579,6 @@ app.post("/api/chat", async (req, res) => {
   }
 });
 
-// ============================================================
-// 🔉 ENDPOINT DE CHAT CON VOZ
-// ============================================================
-
 app.post("/api/chat/voice", async (req, res) => {
   try {
     if (!chatPipeline || !translatePipeline || !ttsPipeline) {
@@ -504,21 +593,17 @@ app.post("/api/chat/voice", async (req, res) => {
       return res.status(400).json({ error: "Mensaje vacío" });
     }
 
-    // 1️⃣ Generar respuesta de texto
     const reply = await generateSpanishReply({ message: message.trim(), mode });
     const emotion = detectEmotion(message);
 
-    // 2️⃣ Generar audio de la respuesta
     console.log("🎙️ Generando voz para la respuesta...");
     const audioResult = await ttsPipeline(reply);
     const audioBase64 = audioResult.audio[0];
     const audioBuffer = Buffer.from(audioBase64, "base64");
 
-    // 3️⃣ Guardar archivo temporal
     const audioPath = path.resolve(`./audio_${Date.now()}.wav`);
     fs.writeFileSync(audioPath, audioBuffer);
 
-    // 4️⃣ Enviar JSON con la ruta del audio y el texto
     res.json({
       reply,
       emotion,
@@ -535,7 +620,6 @@ app.post("/api/chat/voice", async (req, res) => {
   }
 });
 
-// Servir los audios generados
 app.use("/audio", express.static(path.resolve("./")));
 
 app.post("/api/chats/:id/message", async (req, res) => {
@@ -586,12 +670,15 @@ app.get("/api/status", (req, res) => {
     status: chatPipeline && translatePipeline ? "ready" : "loading",
     models: {
       chat: chatPipeline ? "loaded" : "loading",
-      translate: translatePipeline ? "loaded" : "loading"
+      translate: translatePipeline ? "loaded" : "loading",
+      tts: ttsPipeline ? "loaded" : "loading"
     }
   });
 });
 
-// Registro y login
+// ============================================================
+// 🔐 REGISTRO Y LOGIN
+// ============================================================
 app.post('/sign-up', [
   body('username').notEmpty().withMessage('El nombre de usuario es obligatorio.'),
   body('email').isEmail().withMessage('Correo electrónico inválido.'),
@@ -629,7 +716,15 @@ app.post('/login', async (req, res) => {
     const user = await Usuario.findOne({ email });
     if (!user) return res.status(400).json({ message: 'Usuario no encontrado.' });
 
-    const isMatch = await bcrypt.compare(password, user.password || '');
+    // Verificar si el usuario tiene contraseña (no es cuenta de Google)
+    if (!user.password) {
+      return res.status(400).json({ 
+        message: 'Esta cuenta usa autenticación de Google. Por favor, inicia sesión con Google.',
+        useGoogleAuth: true
+      });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ message: 'Contraseña incorrecta.' });
 
     req.login(user, (err) => {
@@ -646,9 +741,395 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// Iniciar servidor
+// ============================================================
+// ✅ FIX: ENDPOINT /api/user/me (perfil del usuario actual)
+// ============================================================
+app.get('/api/user/me', async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(200).json({ message: 'Usuario no autenticado.', loggedIn: false });
+    }
+    const user = await Usuario.findById(req.user._id)
+      .select('username email telefono profilePic bio status followers following');
+    res.json({ ...user.toObject(), loggedIn: true });
+  } catch (err) {
+    console.error('❌ Error en /api/user/me:', err);
+    res.status(500).json({ message: 'Error obteniendo usuario.' });
+  }
+});
+
+// Datos del usuario para front (usa la sesión)
+app.get('/api/user/me', ensureAuthenticated, (req, res) => {
+  const u = req.user || {};
+  res.json({
+    _id: u._id,
+    username: u.username,
+    email: u.email,
+    telefono: u.telefono,
+    status: u.status,
+    followers: u.followers || [],
+    following: u.following || [],
+    profilePic: u.profilePic || '',
+    bio: u.bio || '',
+    loggedIn: true
+  });
+});
+
+// Stories placeholder (evita 404)
+app.get('/api/stories', ensureAuthenticated, async (req, res) => {
+  // De momento vacío
+  res.json([]); 
+});
+
+// ============================================================
+// ✅ FIX: BÚSQUEDA DE USUARIOS
+// ============================================================
+app.get('/api/users/search', ensureAuthenticated, async (req, res) => {
+  try {
+    const { q } = req.query;
+    if (!q) return res.status(400).json({ message: 'Falta el parámetro de búsqueda.' });
+
+    const results = await Usuario.find({
+      $or: [
+        { username: { $regex: q, $options: 'i' } },
+        { email: { $regex: q, $options: 'i' } },
+      ],
+    }).select('username email profilePic');
+
+    res.json(results);
+  } catch (err) {
+    console.error('❌ Error en búsqueda de usuarios:', err);
+    res.status(500).json({ message: 'Error en búsqueda.' });
+  }
+});
+
+// ============================================================
+// ✅ FIX: MENSAJES DIRECTOS ENTRE USUARIOS
+// ============================================================
+const messageSchema = new mongoose.Schema({
+  sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  recipient: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  text: { type: String, required: true },
+  read: { type: Boolean, default: false },
+}, { timestamps: true });
+
+const Message = mongoose.model('Message', messageSchema);
+
+app.get('/api/messages/conversations', ensureAuthenticated, async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const messages = await Message.find({
+      $or: [{ sender: userId }, { recipient: userId }],
+    })
+      .populate('sender', 'username profilePic')
+      .populate('recipient', 'username profilePic')
+      .sort({ updatedAt: -1 });
+
+    const conversations = {};
+    messages.forEach((msg) => {
+      const partner = msg.sender._id.equals(userId) ? msg.recipient : msg.sender;
+      if (!conversations[partner._id]) {
+        conversations[partner._id] = {
+          user: partner,
+          lastMessage: msg.text,
+          timestamp: msg.createdAt,
+        };
+      }
+    });
+
+    res.json(Object.values(conversations));
+  } catch (err) {
+    console.error('❌ Error obteniendo conversaciones:', err);
+    res.status(500).json({ message: 'Error obteniendo conversaciones.' });
+  }
+});
+
+app.get('/api/messages/:userId', ensureAuthenticated, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const currentUser = req.user._id;
+    const messages = await Message.find({
+      $or: [
+        { sender: currentUser, recipient: userId },
+        { sender: userId, recipient: currentUser },
+      ],
+    }).sort({ createdAt: 1 });
+    res.json(messages);
+  } catch (err) {
+    console.error('❌ Error obteniendo mensajes:', err);
+    res.status(500).json({ message: 'Error obteniendo mensajes.' });
+  }
+});
+
+app.post('/api/messages/send', ensureAuthenticated, async (req, res) => {
+  try {
+    const { recipientId, text } = req.body;
+    if (!recipientId || !text) return res.status(400).json({ message: 'Datos incompletos.' });
+
+    const msg = new Message({ sender: req.user._id, recipient: recipientId, text });
+    await msg.save();
+    res.status(201).json({ message: 'Mensaje enviado.', data: msg });
+  } catch (err) {
+    console.error('❌ Error enviando mensaje:', err);
+    res.status(500).json({ message: 'Error enviando mensaje.' });
+  }
+});
+
+// GET Feed con paginación y filtro
+app.get('/api/posts/feed', ensureAuthenticated, async (req, res) => {
+  try {
+    const page  = parseInt(req.query.page ?? '1', 10);
+    const limit = parseInt(req.query.limit ?? '10', 10);
+    const filter = (req.query.filter ?? 'all');
+
+    const q = {}; // simple: todos los públicos
+    if (filter === 'following') {
+      // solo posts de gente a la que sigo y públicos/seguidores
+      const me = await Usuario.findById(req.user._id).select('following');
+      q.author = { $in: me.following };
+      q.visibility = { $in: ['public', 'followers'] };
+    } else if (filter === 'trending') {
+      // a falta de métricas reales: ordenamos por likes + reciente
+      // lo resolvemos solo ordenando por likes length (post-procesado)
+    } else {
+      // 'all'
+      q.visibility = 'public';
+    }
+
+    const posts = await Post.find(q)
+      .populate('author', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    if (filter === 'trending') {
+      posts.sort((a,b) => (b.likes?.length || 0) - (a.likes?.length || 0));
+    }
+
+    res.json({ posts, page, hasMore: posts.length === limit });
+  } catch (err) {
+    console.error('❌ Error feed:', err);
+    res.status(500).json({ message: 'Error al cargar el feed' });
+  }
+});
+
+// ============================================================
+// ✅ FIX: LIKE / UNLIKE POSTS (para Social.astro)
+// ============================================================
+app.post('/api/posts/:id/like', ensureAuthenticated, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ message: 'Post no encontrado.' });
+
+    const userId = req.user._id.toString();
+    const idx = post.likes.findIndex(u => u.toString() === userId);
+
+    let liked = false;
+    if (idx >= 0) {
+      post.likes.splice(idx, 1);
+    } else {
+      post.likes.push(req.user._id);
+      liked = true;
+    }
+    await post.save();
+
+    // 🔔 Tiempo real: emite "post-liked"
+    io.emit('post-liked', { postId: post._id, userId });
+
+    res.json({ liked, likesCount: post.likes.length });
+  } catch (err) {
+    console.error('❌ Error like:', err);
+    res.status(500).json({ message: 'Error al dar like.' });
+  }
+});
+
+// ============================================================
+// ✅ FIX: CRUD DE PUBLICACIONES (POSTS)
+// ============================================================
+
+// 🔹 Obtener todos los posts (feed principal)
+app.get('/api/posts', ensureAuthenticated, async (req, res) => {
+  try {
+    const posts = await Post.find()
+      .populate('author', 'username profilePic')
+      .populate('comments.author', 'username profilePic')
+      .sort({ createdAt: -1 });
+
+    res.json(posts);
+  } catch (err) {
+    console.error('❌ Error obteniendo posts:', err);
+    res.status(500).json({ message: 'Error obteniendo publicaciones.' });
+  }
+});
+
+// 🔹 Crear una nueva publicación
+app.post('/api/posts', ensureAuthenticated, uploadPostMedia.array('images', 10), async (req, res) => {
+  try {
+    const { caption = '', visibility = 'public' } = req.body;
+    const tags = req.body.tags ? JSON.parse(req.body.tags) : [];
+    const location = req.body.location || '';
+
+    const images = (req.files || []).map(f => f.path);
+
+    if (!caption.trim() && images.length === 0) {
+      return res.status(400).json({ message: 'El post debe tener texto o una imagen.' });
+    }
+
+    const post = await Post.create({
+      author: req.user._id,
+      caption: caption.trim(),
+      images,
+      tags,
+      location,
+      visibility
+    });
+
+    const populated = await post.populate('author', 'username profilePic');
+    // 🔔 Tiempo real: emite "post-created"
+    io.emit('post-created', { post: populated });
+
+    res.status(201).json({ message: 'Post creado correctamente.', post: populated });
+  } catch (err) {
+    console.error('❌ Error creando post:', err);
+    res.status(500).json({ message: 'Error al crear post.' });
+  }
+});
+
+// 🔹 Obtener un post específico por ID
+app.get('/api/posts/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id)
+      .populate('author', 'username profilePic')
+      .populate('comments.author', 'username profilePic');
+
+    if (!post) return res.status(404).json({ message: 'Post no encontrado.' });
+    res.json(post);
+  } catch (err) {
+    console.error('❌ Error obteniendo post:', err);
+    res.status(500).json({ message: 'Error obteniendo post.' });
+  }
+});
+
+// ============================================================
+// ✅ CRUD DE COMENTARIOS (para Social.astro)
+// ============================================================
+// ============================================================
+// 💬 COMENTARIOS EN PUBLICACIONES (funcionales con /Social)
+// ============================================================
+// ✅ Obtener todos los comentarios de un post
+app.get('/api/posts/:id/comments', ensureAuthenticated, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id)
+      .populate('comments.user', 'username profilePic')
+      .lean();
+
+    if (!post) {
+      return res.status(404).json({ message: 'Post no encontrado.' });
+    }
+
+    res.json(post.comments || []);
+  } catch (err) {
+    console.error('❌ Error obteniendo comentarios:', err);
+    res.status(500).json({ message: 'Error al obtener comentarios.' });
+  }
+});
+
+// ✅ Agregar nuevo comentario
+app.post('/api/posts/:id/comments', ensureAuthenticated, async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || !text.trim()) {
+      return res.status(400).json({ message: 'El comentario no puede estar vacío.' });
+    }
+
+    const post = await Post.findById(req.params.id);
+    if (!post) {
+      return res.status(404).json({ message: 'Post no encontrado.' });
+    }
+
+    const newComment = {
+      user: req.user._id,
+      text: text.trim(),
+      createdAt: new Date(),
+    };
+
+    post.comments.push(newComment);
+    await post.save();
+
+    // 🔹 Traer el último comentario con datos del usuario
+    const populatedComment = await Post.populate(
+      post.comments[post.comments.length - 1],
+      { path: 'user', select: 'username profilePic' }
+    );
+
+    // 🔔 Si tienes socket.io activo
+    if (global.io) {
+      global.io.emit('comment-added', {
+        postId: post._id,
+        comment: populatedComment,
+      });
+    }
+
+    res.status(201).json(populatedComment);
+  } catch (err) {
+    console.error('❌ Error agregando comentario:', err);
+    res.status(500).json({ message: 'Error al agregar comentario.' });
+  }
+});
+
+// 🔹 Eliminar un comentario (solo si el usuario es autor)
+app.delete('/api/comments/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const comment = await Comment.findById(req.params.id);
+    if (!comment) return res.status(404).json({ message: 'Comentario no encontrado.' });
+
+    if (comment.author.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No autorizado para eliminar este comentario.' });
+    }
+
+    await Comment.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Comentario eliminado correctamente.' });
+  } catch (err) {
+    console.error('❌ Error eliminando comentario:', err);
+    res.status(500).json({ message: 'Error eliminando comentario.' });
+  }
+});
+
+app.put('/api/messages/:id/read', ensureAuthenticated, async (req, res) => {
+  try {
+    const msg = await Message.findByIdAndUpdate(req.params.id, { read: true }, { new: true });
+    res.json({ message: 'Mensaje marcado como leído', data: msg });
+  } catch (error) {
+    res.status(500).json({ message: 'Error marcando mensaje como leído.' });
+  }
+});
+
+// ============================================================
+// ⚡ SOCKET.IO — COMENTARIOS, LIKES Y MENSAJES EN TIEMPO REAL
+// ============================================================
+// crea http server
+const httpServer = http.createServer(app);
+
+// socket.io
+const io = new SocketIOServer(httpServer, {
+  cors: {
+    origin: process.env.CLIENT_URL || 'http://localhost:4321',
+    credentials: true,
+  }
+});
+global.io = io; // para usar io en rutas
+
+io.on('connection', (socket) => {
+  // puedes agregar join por userId si quieres rooms
+  socket.on('disconnect', () => {});
+});
+
+// ============================================================
+// ✅ INICIAR SERVIDOR CON SOCKET.IO
+// ============================================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+httpServer.listen(PORT, () => {
+  console.log(`🚀 Servidor con Socket.IO corriendo en http://localhost:${PORT}`);
   console.log('Esperando a que los modelos de IA terminen de cargar...');
 });

@@ -10,10 +10,10 @@ exports.registerUser = async (req, res) => {
     // Validar si ya existe
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.status(400).json({ message: 'El usuario ya existe.' });
+      return res.status(400).json({ message: 'El User ya existe.' });
     }
 
-    // Crear y guardar usuario
+    // Crear y guardar User
     const newUser = new User({ username, email, phone, password });
     await newUser.save();
 
@@ -21,12 +21,12 @@ exports.registerUser = async (req, res) => {
     const token = jwt.sign({ id: newUser._id }, process.env.JWT_SECRET, { expiresIn: '1d' });
 
     res.status(201).json({
-      message: 'Usuario registrado correctamente',
+      message: 'User registrado correctamente',
       user: newUser,
       token
     });
   } catch (err) {
-    console.error('Error al registrar usuario:', err);
+    console.error('Error al registrar User:', err);
     res.status(500).json({ message: 'Error del servidor', error: err.message });
   }
 };
@@ -36,10 +36,10 @@ exports.loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Verificar usuario
+    // Verificar User
     const user = await User.findOne({ email });
     if (!user)
-      return res.status(404).json({ message: 'Usuario no encontrado' });
+      return res.status(404).json({ message: 'User no encontrado' });
 
     // Comparar contraseñas
     const isMatch = await bcrypt.compare(password, user.password);
