@@ -177,6 +177,53 @@ const chatSessionSchema = new mongoose.Schema({
 const ChatSession = mongoose.models.ChatSession || mongoose.model("ChatSession", chatSessionSchema);
 
 // ============================================================
+// 🆕 NUEVOS MODELOS: Notifications, Stories y Location
+// ============================================================
+
+// 📩 Notificaciones (likes, follows, comments, mensajes)
+const notificationSchema = new mongoose.Schema({
+  recipient: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  type: { 
+    type: String, 
+    enum: ['like', 'comment', 'follow', 'message', 'system'], 
+    required: true 
+  },
+  message: { type: String },
+  read: { type: Boolean, default: false },
+  entityId: { type: mongoose.Schema.Types.ObjectId }, // referencia opcional (post, comment, etc.)
+}, { timestamps: true });
+
+const Notification = mongoose.models.Notification || mongoose.model('Notification', notificationSchema);
+
+
+// 📸 Historias de usuarios
+const storySchema = new mongoose.Schema({
+  author: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  mediaUrl: { type: String, required: true },
+  caption: { type: String },
+  expiresAt: { type: Date, required: true },
+  viewers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
+}, { timestamps: true });
+
+const Story = mongoose.models.Story || mongoose.model('Story', storySchema);
+
+
+// 📍 Ubicación del usuario
+const locationSchema = new mongoose.Schema({
+  lat: Number,
+  lng: Number,
+  country: String,
+  city: String,
+  updatedAt: { type: Date, default: Date.now }
+}, { _id: false });
+
+// Añadimos el campo al modelo User
+if (!usuarioSchema.paths.location) {
+  usuarioSchema.add({ location: locationSchema });
+}
+
+// ============================================================
 // 🔐 SESIONES Y AUTENTICACIÓN (Passport + Google)
 // ============================================================
 app.use(session({
@@ -808,6 +855,32 @@ app.get('/api/user/me', async (req, res) => {
   }
 });
 
+// ============================================================
+// 📈 ACTIVIDAD Y ESTADÍSTICAS
+// ============================================================
+
+app.get('/api/users/me/activity-stats', ensureAuthenticated, async (req, res) => {
+  try {
+    const postsCount = await Post.countDocuments({ author: req.user._id });
+    const followers = await Usuario.findById(req.user._id).select('followers following');
+    const likes = await Post.aggregate([
+      { $match: { author: req.user._id } },
+      { $project: { likes: { $size: '$likes' } } },
+      { $group: { _id: null, totalLikes: { $sum: '$likes' } } }
+    ]);
+
+    res.json({
+      posts: postsCount,
+      followers: followers.followers.length,
+      following: followers.following.length,
+      totalLikes: likes[0]?.totalLikes || 0,
+    });
+  } catch (err) {
+    console.error('❌ Error obteniendo estadísticas:', err);
+    res.status(500).json({ message: 'Error obteniendo estadísticas.' });
+  }
+});
+
 // 🔹 Buscar usuarios por nombre o email
 app.get('/api/users/search', ensureAuthenticated, async (req, res) => {
   try {
@@ -852,6 +925,61 @@ app.get('/api/users/search', ensureAuthenticated, async (req, res) => {
       message: 'Error buscando usuarios.', 
       error: err.message 
     });
+  }
+});
+
+// ============================================================
+// 📍 UBICACIÓN DE USUARIOS
+// ============================================================
+
+// Actualizar ubicación del usuario
+app.put('/api/users/location', ensureAuthenticated, async (req, res) => {
+  try {
+    const { lat, lng, country, city } = req.body;
+    if (!lat || !lng) return res.status(400).json({ message: 'Coordenadas requeridas.' });
+
+    const user = await Usuario.findByIdAndUpdate(
+      req.user._id,
+      { location: { lat, lng, country, city, updatedAt: new Date() } },
+      { new: true }
+    );
+
+    res.json({ message: 'Ubicación actualizada', location: user.location });
+  } catch (err) {
+    console.error('❌ Error actualizando ubicación:', err);
+    res.status(500).json({ message: 'Error actualizando ubicación.' });
+  }
+});
+
+// Buscar usuarios cercanos (radio de 50 km)
+app.get('/api/users/nearby', ensureAuthenticated, async (req, res) => {
+  try {
+    const { lat, lng } = req.query;
+    if (!lat || !lng) return res.status(400).json({ message: 'Coordenadas requeridas.' });
+
+    const R = 6371; // radio terrestre en km
+    const maxDist = 50; // radio de 50 km
+
+    const users = await Usuario.find({
+      _id: { $ne: req.user._id },
+      location: { $exists: true, $ne: null }
+    })
+      .lean();
+
+    const nearby = users.filter(u => {
+      if (!u.location?.lat || !u.location?.lng) return false;
+      const dLat = (u.location.lat - lat) * Math.PI / 180;
+      const dLng = (u.location.lng - lng) * Math.PI / 180;
+      const a = Math.sin(dLat/2)**2 + Math.cos(lat*Math.PI/180) * Math.cos(u.location.lat*Math.PI/180) * Math.sin(dLng/2)**2;
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      const dist = R * c;
+      return dist <= maxDist;
+    });
+
+    res.json(nearby);
+  } catch (err) {
+    console.error('❌ Error buscando usuarios cercanos:', err);
+    res.status(500).json({ message: 'Error buscando usuarios cercanos.' });
   }
 });
 
@@ -1114,6 +1242,40 @@ app.get('/api/users/:id/saved-posts', ensureAuthenticated, async (req, res) => {
   }
 });
 
+// ============================================================
+// 📩 NOTIFICACIONES
+// ============================================================
+
+// Obtener notificaciones del usuario autenticado
+app.get('/api/notifications', ensureAuthenticated, async (req, res) => {
+  try {
+    const notifications = await Notification.find({ recipient: req.user._id })
+      .populate('sender', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .lean();
+
+    res.json(notifications);
+  } catch (err) {
+    console.error('❌ Error obteniendo notificaciones:', err);
+    res.status(500).json({ message: 'Error obteniendo notificaciones.' });
+  }
+});
+
+// Marcar notificaciones como leídas
+app.post('/api/notifications/mark-read', ensureAuthenticated, async (req, res) => {
+  try {
+    await Notification.updateMany(
+      { recipient: req.user._id, read: false },
+      { $set: { read: true } }
+    );
+    res.json({ message: 'Notificaciones marcadas como leídas' });
+  } catch (err) {
+    console.error('❌ Error marcando notificaciones:', err);
+    res.status(500).json({ message: 'Error marcando notificaciones.' });
+  }
+});
+
 // 🔹 Guardar/Desguardar un post
 app.post('/api/posts/:id/save', ensureAuthenticated, async (req, res) => {
   try {
@@ -1148,6 +1310,83 @@ app.post('/api/posts/:id/save', ensureAuthenticated, async (req, res) => {
       message: 'Error al guardar post.',
       error: err.message 
     });
+  }
+});
+
+// ============================================================
+// 🔥 EXPLORAR: POSTS POPULARES
+// ============================================================
+app.get('/api/explore/trending', ensureAuthenticated, async (req, res) => {
+  try {
+    const posts = await Post.find({ visibility: 'public' })
+      .populate('author', 'username profilePic')
+      .sort({ 'likes.length': -1, createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    res.json(posts);
+  } catch (err) {
+    console.error('❌ Error en trending:', err);
+    res.status(500).json({ message: 'Error cargando publicaciones populares.' });
+  }
+});
+
+// ============================================================
+// 📸 HISTORIAS (STORIES)
+// ============================================================
+
+// Subir historia (24h de duración)
+app.post('/api/stories', ensureAuthenticated, uploadPostMedia.single('media'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: 'Archivo no recibido.' });
+
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const story = await Story.create({
+      author: req.user._id,
+      mediaUrl: req.file.path,
+      caption: req.body.caption || '',
+      expiresAt
+    });
+
+    const populated = await story.populate('author', 'username profilePic');
+    io.emit('story-created', { story: populated });
+
+    res.status(201).json(populated);
+  } catch (err) {
+    console.error('❌ Error subiendo historia:', err);
+    res.status(500).json({ message: 'Error subiendo historia.' });
+  }
+});
+
+// Obtener historias activas (no expiradas)
+app.get('/api/stories', ensureAuthenticated, async (req, res) => {
+  try {
+    const now = new Date();
+    const stories = await Story.find({ expiresAt: { $gt: now } })
+      .populate('author', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json(stories);
+  } catch (err) {
+    console.error('❌ Error obteniendo historias:', err);
+    res.status(500).json({ message: 'Error obteniendo historias.' });
+  }
+});
+
+app.post('/api/stories/:id/view', ensureAuthenticated, async (req, res) => {
+  try {
+    const story = await Story.findById(req.params.id);
+    if (!story) return res.status(404).json({ message: 'Historia no encontrada' });
+    
+    if (!story.viewers.includes(req.user._id)) {
+      story.viewers.push(req.user._id);
+      await story.save();
+    }
+    
+    res.json({ message: 'Vista registrada' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error registrando vista' });
   }
 });
 
@@ -1769,70 +2008,201 @@ app.post('/api/posts', ensureAuthenticated, uploadPostMedia.array('images', 10),
   }
 });
 
-// 🔹 Obtener un post específico por ID
-app.get('/api/posts/:id', ensureAuthenticated, async (req, res) => {
-  try {
-    const post = await Post.findById(req.params.id)
-      .populate('author', 'username profilePic')
-      .populate('comments.author', 'username profilePic');
+// ============================================================
+// 📝 CRUD COMPLETO DE POSTS (AGREGAR DESPUÉS DE app.get('/api/posts/:id'))
+// ============================================================
 
-    if (!post) return res.status(404).json({ message: 'Post no encontrado.' });
-    res.json(post);
-  } catch (err) {
-    console.error('❌ Error obteniendo post:', err);
-    res.status(500).json({ message: 'Error obteniendo post.' });
-  }
-});
-
-// Endpoint temporal para limpiar mensajes corruptos
-app.get('/api/messages/cleanup', async (req, res) => {
+// 🔹 ACTUALIZAR un post (solo el autor)
+app.put('/api/posts/:id', ensureAuthenticated, async (req, res) => {
   try {
-    // Obtener todos los IDs de usuarios válidos
-    const validUserIds = await Usuario.find().distinct('_id');
+    const { caption, tags, location, visibility } = req.body;
+    const post = await Post.findById(req.params.id);
     
-    // Eliminar mensajes con sender o recipient inválidos
-    const result = await Message.deleteMany({
-      $or: [
-        { sender: { $nin: validUserIds } },
-        { recipient: { $nin: validUserIds } }
-      ]
-    });
-
-    res.json({ 
-      message: 'Limpieza completada',
-      deletedCount: result.deletedCount 
-    });
-  } catch (err) {
-    console.error('Error limpiando mensajes:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ============================================================
-// ✅ CRUD DE COMENTARIOS (para Social.astro)
-// ============================================================
-// ============================================================
-// 💬 COMENTARIOS EN PUBLICACIONES (funcionales con /Social)
-// ============================================================
-// ✅ Obtener todos los comentarios de un post
-app.get('/api/posts/:id/comments', ensureAuthenticated, async (req, res) => {
-  try {
-    const post = await Post.findById(req.params.id)
-      .populate('comments.user', 'username profilePic')
-      .lean();
-
     if (!post) {
       return res.status(404).json({ message: 'Post no encontrado.' });
     }
 
-    res.json(post.comments || []);
+    // Verificar que el usuario es el autor
+    if (post.author.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para editar este post.' });
+    }
+
+    // Actualizar campos
+    if (caption !== undefined) post.caption = caption;
+    if (tags !== undefined) post.tags = tags;
+    if (location !== undefined) post.location = location;
+    if (visibility !== undefined) post.visibility = visibility;
+
+    await post.save();
+    
+    const updated = await post.populate('author', 'username profilePic');
+    
+    // Emitir evento de socket
+    if (global.io) {
+      global.io.emit('post-updated', { post: updated });
+    }
+
+    console.log('✅ Post actualizado:', post._id);
+    res.json({ message: 'Post actualizado correctamente.', post: updated });
   } catch (err) {
-    console.error('❌ Error obteniendo comentarios:', err);
-    res.status(500).json({ message: 'Error al obtener comentarios.' });
+    console.error('❌ Error actualizando post:', err);
+    res.status(500).json({ message: 'Error actualizando post.', error: err.message });
   }
 });
 
-// ✅ Agregar nuevo comentario
+// 🔹 ELIMINAR un post (solo el autor)
+app.delete('/api/posts/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    
+    if (!post) {
+      return res.status(404).json({ message: 'Post no encontrado.' });
+    }
+
+    // Verificar que el usuario es el autor
+    if (post.author.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para eliminar este post.' });
+    }
+
+    // Eliminar el post
+    await Post.findByIdAndDelete(req.params.id);
+    
+    // Eliminar referencias en usuarios (savedPosts)
+    await Usuario.updateMany(
+      { savedPosts: req.params.id },
+      { $pull: { savedPosts: req.params.id } }
+    );
+
+    // Emitir evento de socket
+    if (global.io) {
+      global.io.emit('post-deleted', { postId: req.params.id });
+    }
+
+    console.log('✅ Post eliminado:', req.params.id);
+    res.json({ message: 'Post eliminado correctamente.' });
+  } catch (err) {
+    console.error('❌ Error eliminando post:', err);
+    res.status(500).json({ message: 'Error eliminando post.', error: err.message });
+  }
+});
+
+// 🔹 Obtener posts de un usuario específico
+app.get('/api/users/:id/posts', ensureAuthenticated, async (req, res) => {
+  try {
+    const userId = req.params.id === 'me' ? req.user._id : req.params.id;
+    
+    console.log('📸 Obteniendo posts de usuario:', userId);
+
+    const posts = await Post.find({ author: userId })
+      .populate('author', 'username profilePic')
+      .populate('comments.user', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    console.log(`✅ ${posts.length} posts encontrados`);
+    res.json(posts);
+  } catch (err) {
+    console.error('❌ Error obteniendo posts del usuario:', err);
+    res.status(500).json({ 
+      message: 'Error obteniendo posts del usuario.',
+      error: err.message 
+    });
+  }
+});
+
+// ============================================================
+// 🔔 SISTEMA DE NOTIFICACIONES MEJORADO
+// ============================================================
+
+// Función helper para crear notificaciones
+async function createNotification(recipientId, senderId, type, message, entityId = null) {
+  try {
+    // No crear notificación si el usuario se interactúa consigo mismo
+    if (recipientId.toString() === senderId.toString()) {
+      return null;
+    }
+
+    const notification = await Notification.create({
+      recipient: recipientId,
+      sender: senderId,
+      type,
+      message,
+      entityId,
+      read: false
+    });
+
+    const populated = await notification.populate('sender', 'username profilePic');
+
+    // Emitir evento de socket
+    if (global.io) {
+      global.io.to(recipientId.toString()).emit('new-notification', populated);
+    }
+
+    console.log('🔔 Notificación creada:', type);
+    return populated;
+  } catch (err) {
+    console.error('❌ Error creando notificación:', err);
+    return null;
+  }
+}
+
+// 🔹 LIKE EN POST CON NOTIFICACIÓN (REEMPLAZAR el endpoint existente)
+app.post('/api/posts/:id/like', ensureAuthenticated, async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id).populate('author', 'username');
+    if (!post) {
+      return res.status(404).json({ message: 'Post no encontrado.' });
+    }
+
+    const userId = req.user._id.toString();
+    const idx = post.likes.findIndex(u => u.toString() === userId);
+
+    let liked = false;
+    if (idx >= 0) {
+      // Unlike
+      post.likes.splice(idx, 1);
+      console.log('💔 Like removido del post:', post._id);
+    } else {
+      // Like
+      post.likes.push(req.user._id);
+      liked = true;
+      
+      // 🔔 Crear notificación para el autor del post
+      await createNotification(
+        post.author._id,
+        req.user._id,
+        'like',
+        `${req.user.username} le dio like a tu publicación`,
+        post._id
+      );
+      
+      console.log('❤️ Like agregado al post:', post._id);
+    }
+    
+    await post.save();
+
+    // Emitir evento de socket
+    if (global.io) {
+      global.io.emit('post-liked', { 
+        postId: post._id, 
+        userId,
+        liked,
+        likesCount: post.likes.length 
+      });
+    }
+
+    res.json({ 
+      liked, 
+      likesCount: post.likes.length,
+      message: liked ? 'Like agregado' : 'Like removido'
+    });
+  } catch (err) {
+    console.error('❌ Error en like:', err);
+    res.status(500).json({ message: 'Error al dar like.', error: err.message });
+  }
+});
+
+// 🔹 COMENTAR POST CON NOTIFICACIÓN (REEMPLAZAR el endpoint existente)
 app.post('/api/posts/:id/comments', ensureAuthenticated, async (req, res) => {
   try {
     const { text } = req.body;
@@ -1840,7 +2210,7 @@ app.post('/api/posts/:id/comments', ensureAuthenticated, async (req, res) => {
       return res.status(400).json({ message: 'El comentario no puede estar vacío.' });
     }
 
-    const post = await Post.findById(req.params.id);
+    const post = await Post.findById(req.params.id).populate('author', 'username');
     if (!post) {
       return res.status(404).json({ message: 'Post no encontrado.' });
     }
@@ -1854,53 +2224,386 @@ app.post('/api/posts/:id/comments', ensureAuthenticated, async (req, res) => {
     post.comments.push(newComment);
     await post.save();
 
-    // 🔹 Traer el último comentario con datos del usuario
+    // 🔹 OBTENER COMENTARIOS DE UN POST
+app.get('/api/posts/:id/comments', async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id)
+      .populate({
+        path: 'comments.user',
+        select: 'username avatar'
+      });
+    
+    if (!post) {
+      return res.status(404).json({ message: 'Post no encontrado.' });
+    }
+
+    // Devolver solo los comentarios
+    res.json(post.comments || []);
+  } catch (error) {
+    console.error('Error al obtener comentarios:', error);
+    res.status(500).json({ message: 'Error al obtener comentarios.' });
+  }
+});
+
+    // Poblar el comentario recién creado
     const populatedComment = await Post.populate(
       post.comments[post.comments.length - 1],
       { path: 'user', select: 'username profilePic' }
     );
 
-    // 🔔 Si tienes socket.io activo
+    // 🔔 Crear notificación para el autor del post
+    await createNotification(
+      post.author._id,
+      req.user._id,
+      'comment',
+      `${req.user.username} comentó tu publicación`,
+      post._id
+    );
+
+    // Emitir evento de socket
     if (global.io) {
       global.io.emit('comment-added', {
         postId: post._id,
         comment: populatedComment,
+        commentsCount: post.comments.length
       });
     }
 
-    res.status(201).json(populatedComment);
+    console.log('💬 Comentario agregado al post:', post._id);
+    res.status(201).json({
+      comment: populatedComment,
+      commentsCount: post.comments.length
+    });
   } catch (err) {
     console.error('❌ Error agregando comentario:', err);
-    res.status(500).json({ message: 'Error al agregar comentario.' });
+    res.status(500).json({ message: 'Error al agregar comentario.', error: err.message });
   }
 });
 
-// 🔹 Eliminar un comentario (solo si el usuario es autor)
-app.delete('/api/comments/:id', ensureAuthenticated, async (req, res) => {
+// 🔹 SEGUIR USUARIO CON NOTIFICACIÓN (REEMPLAZAR el endpoint existente)
+app.post('/api/users/:id/follow', ensureAuthenticated, async (req, res) => {
   try {
-    const comment = await Comment.findById(req.params.id);
-    if (!comment) return res.status(404).json({ message: 'Comentario no encontrado.' });
+    const targetId = req.params.id;
+    const currentUserId = req.user._id;
 
-    if (comment.author.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: 'No autorizado para eliminar este comentario.' });
+    if (targetId === currentUserId.toString()) {
+      return res.status(400).json({ message: 'No puedes seguirte a ti mismo.' });
     }
 
-    await Comment.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Comentario eliminado correctamente.' });
+    const targetUser = await Usuario.findById(targetId);
+    const currentUser = await Usuario.findById(currentUserId);
+
+    if (!targetUser) {
+      return res.status(404).json({ message: 'Usuario no encontrado.' });
+    }
+
+    const isFollowing = currentUser.following.includes(targetId);
+
+    if (isFollowing) {
+      // Unfollow
+      currentUser.following.pull(targetId);
+      targetUser.followers.pull(currentUserId);
+      console.log(`👋 ${currentUser.username} dejó de seguir a ${targetUser.username}`);
+    } else {
+      // Follow
+      currentUser.following.push(targetId);
+      targetUser.followers.push(currentUserId);
+      
+      // 🔔 Crear notificación
+      await createNotification(
+        targetUser._id,
+        currentUser._id,
+        'follow',
+        `${currentUser.username} comenzó a seguirte`
+      );
+      
+      console.log(`✅ ${currentUser.username} ahora sigue a ${targetUser.username}`);
+    }
+
+    await currentUser.save();
+    await targetUser.save();
+
+    // Emitir evento de socket
+    if (global.io) {
+      global.io.emit('user-followed', {
+        followerId: currentUserId,
+        followedId: targetId,
+        following: !isFollowing
+      });
+    }
+
+    res.json({ 
+      following: !isFollowing,
+      followersCount: targetUser.followers.length,
+      message: isFollowing 
+        ? `Has dejado de seguir a ${targetUser.username}`
+        : `Ahora sigues a ${targetUser.username}`
+    });
   } catch (err) {
-    console.error('❌ Error eliminando comentario:', err);
-    res.status(500).json({ message: 'Error eliminando comentario.' });
+    console.error('❌ Error en follow:', err);
+    res.status(500).json({ 
+      message: 'Error al seguir o dejar de seguir usuario.',
+      error: err.message 
+    });
   }
 });
 
-app.put('/api/messages/:id/read', ensureAuthenticated, async (req, res) => {
+// 🔹 Obtener notificaciones NO LEÍDAS del usuario
+app.get('/api/notifications/unread', ensureAuthenticated, async (req, res) => {
   try {
-    const msg = await Message.findByIdAndUpdate(req.params.id, { read: true }, { new: true });
-    res.json({ message: 'Mensaje marcado como leído', data: msg });
-  } catch (error) {
-    res.status(500).json({ message: 'Error marcando mensaje como leído.' });
+    const notifications = await Notification.find({ 
+      recipient: req.user._id,
+      read: false 
+    })
+      .populate('sender', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    console.log(`🔔 ${notifications.length} notificaciones no leídas`);
+    res.json(notifications);
+  } catch (err) {
+    console.error('❌ Error obteniendo notificaciones:', err);
+    res.status(500).json({ message: 'Error obteniendo notificaciones.', error: err.message });
   }
 });
+
+// 🔹 Contar notificaciones no leídas
+app.get('/api/notifications/unread-count', ensureAuthenticated, async (req, res) => {
+  try {
+    const count = await Notification.countDocuments({ 
+      recipient: req.user._id,
+      read: false 
+    });
+
+    res.json({ count });
+  } catch (err) {
+    console.error('❌ Error contando notificaciones:', err);
+    res.status(500).json({ message: 'Error contando notificaciones.', error: err.message });
+  }
+});
+
+// 🔹 Marcar una notificación específica como leída
+app.put('/api/notifications/:id/read', ensureAuthenticated, async (req, res) => {
+  try {
+    const notification = await Notification.findOneAndUpdate(
+      { _id: req.params.id, recipient: req.user._id },
+      { read: true },
+      { new: true }
+    ).populate('sender', 'username profilePic');
+
+    if (!notification) {
+      return res.status(404).json({ message: 'Notificación no encontrada.' });
+    }
+
+    res.json({ message: 'Notificación marcada como leída', notification });
+  } catch (err) {
+    console.error('❌ Error marcando notificación:', err);
+    res.status(500).json({ message: 'Error marcando notificación.', error: err.message });
+  }
+});
+
+// 🔹 Eliminar una notificación
+app.delete('/api/notifications/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const result = await Notification.findOneAndDelete({
+      _id: req.params.id,
+      recipient: req.user._id
+    });
+
+    if (!result) {
+      return res.status(404).json({ message: 'Notificación no encontrada.' });
+    }
+
+    res.json({ message: 'Notificación eliminada correctamente.' });
+  } catch (err) {
+    console.error('❌ Error eliminando notificación:', err);
+    res.status(500).json({ message: 'Error eliminando notificación.', error: err.message });
+  }
+});
+
+// ============================================================
+// 🔧 ENDPOINTS ADICIONALES ÚTILES
+// ============================================================
+
+// 🔹 Verificar si un usuario sigue a otro
+app.get('/api/users/:id/is-following', ensureAuthenticated, async (req, res) => {
+  try {
+    const targetId = req.params.id;
+    const currentUser = await Usuario.findById(req.user._id).select('following');
+    
+    const isFollowing = currentUser.following.some(
+      id => id.toString() === targetId
+    );
+
+    res.json({ isFollowing });
+  } catch (err) {
+    console.error('❌ Error verificando follow:', err);
+    res.status(500).json({ message: 'Error verificando seguimiento.', error: err.message });
+  }
+});
+
+// 🔹 Verificar si un post está guardado
+app.get('/api/posts/:id/is-saved', ensureAuthenticated, async (req, res) => {
+  try {
+    const postId = req.params.id;
+    const user = await Usuario.findById(req.user._id).select('savedPosts');
+    
+    const isSaved = user.savedPosts.some(
+      id => id.toString() === postId
+    );
+
+    res.json({ isSaved });
+  } catch (err) {
+    console.error('❌ Error verificando guardado:', err);
+    res.status(500).json({ message: 'Error verificando guardado.', error: err.message });
+  }
+});
+
+// 🔹 Verificar si un post tiene like del usuario
+app.get('/api/posts/:id/is-liked', ensureAuthenticated, async (req, res) => {
+  try {
+    const postId = req.params.id;
+    const post = await Post.findById(postId).select('likes');
+    
+    if (!post) {
+      return res.status(404).json({ message: 'Post no encontrado.' });
+    }
+
+    const isLiked = post.likes.some(
+      id => id.toString() === req.user._id.toString()
+    );
+
+    res.json({ 
+      isLiked,
+      likesCount: post.likes.length 
+    });
+  } catch (err) {
+    console.error('❌ Error verificando like:', err);
+    res.status(500).json({ message: 'Error verificando like.', error: err.message });
+  }
+});
+
+// 🔹 Búsqueda de posts por hashtag
+app.get('/api/posts/search/tags', ensureAuthenticated, async (req, res) => {
+  try {
+    const { tag } = req.query;
+    
+    if (!tag) {
+      return res.status(400).json({ message: 'Tag requerido.' });
+    }
+
+    console.log('🔍 Buscando posts con tag:', tag);
+
+    const posts = await Post.find({ 
+      tags: { $regex: tag, $options: 'i' },
+      visibility: 'public'
+    })
+      .populate('author', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    console.log(`✅ ${posts.length} posts encontrados con tag`);
+    res.json(posts);
+  } catch (err) {
+    console.error('❌ Error buscando por tag:', err);
+    res.status(500).json({ message: 'Error buscando posts.', error: err.message });
+  }
+});
+
+// 🔹 Búsqueda general de posts
+app.get('/api/posts/search/query', ensureAuthenticated, async (req, res) => {
+  try {
+    const { q } = req.query;
+    
+    if (!q) {
+      return res.status(400).json({ message: 'Query requerido.' });
+    }
+
+    console.log('🔍 Buscando posts con query:', q);
+
+    const posts = await Post.find({
+      $or: [
+        { caption: { $regex: q, $options: 'i' } },
+        { tags: { $regex: q, $options: 'i' } },
+        { location: { $regex: q, $options: 'i' } }
+      ],
+      visibility: 'public'
+    })
+      .populate('author', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    console.log(`✅ ${posts.length} posts encontrados`);
+    res.json(posts);
+  } catch (err) {
+    console.error('❌ Error en búsqueda:', err);
+    res.status(500).json({ message: 'Error buscando posts.', error: err.message });
+  }
+});
+
+// ============================================================
+// 📊 ESTADÍSTICAS MEJORADAS
+// ============================================================
+
+// 🔹 Dashboard completo del usuario
+app.get('/api/users/me/dashboard', ensureAuthenticated, async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    // Obtener datos del usuario
+    const user = await Usuario.findById(userId)
+      .select('username email profilePic bio followers following savedPosts')
+      .lean();
+
+    // Contar posts
+    const postsCount = await Post.countDocuments({ author: userId });
+
+    // Calcular likes totales recibidos
+    const userPosts = await Post.find({ author: userId }).select('likes').lean();
+    const totalLikesReceived = userPosts.reduce((sum, post) => sum + (post.likes?.length || 0), 0);
+
+    // Contar comentarios recibidos
+    const commentsReceived = userPosts.reduce((sum, post) => sum + (post.comments?.length || 0), 0);
+
+    // Notificaciones no leídas
+    const unreadNotifications = await Notification.countDocuments({
+      recipient: userId,
+      read: false
+    });
+
+    // Posts guardados
+    const savedPostsCount = user.savedPosts?.length || 0;
+
+    const dashboard = {
+      user: {
+        username: user.username,
+        email: user.email,
+        profilePic: user.profilePic,
+        bio: user.bio
+      },
+      stats: {
+        posts: postsCount,
+        followers: user.followers?.length || 0,
+        following: user.following?.length || 0,
+        likesReceived: totalLikesReceived,
+        commentsReceived: commentsReceived,
+        savedPosts: savedPostsCount,
+        unreadNotifications: unreadNotifications
+      }
+    };
+
+    console.log('📊 Dashboard generado para:', user.username);
+    res.json(dashboard);
+  } catch (err) {
+    console.error('❌ Error generando dashboard:', err);
+    res.status(500).json({ message: 'Error generando dashboard.', error: err.message });
+  }
+});
+
+console.log('✅ Todos los endpoints corregidos y agregados correctamente');
 
 // ============================================================
 // ⚡ SOCKET.IO — COMENTARIOS, LIKES Y MENSAJES EN TIEMPO REAL
