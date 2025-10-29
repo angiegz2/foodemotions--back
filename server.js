@@ -2603,7 +2603,30 @@ app.get('/api/users/me/dashboard', ensureAuthenticated, async (req, res) => {
   }
 });
 
-console.log('✅ Todos los endpoints corregidos y agregados correctamente');
+// ============================================================
+// 🔍 BUSCAR USUARIOS (para SearchBar)
+// ============================================================
+app.get('/api/users/search', ensureAuthenticated, async (req, res) => {
+  try {
+    const query = req.query.q?.trim();
+
+    if (!query) {
+      return res.status(400).json({ message: 'Se requiere un término de búsqueda.' });
+    }
+
+    // Buscar usuarios cuyo nombre contenga la query (ignorando mayúsculas/minúsculas)
+    const users = await Usuario.find({
+      username: { $regex: query, $options: 'i' }
+    })
+      .select('username profilePic bio _id') // solo los datos necesarios
+      .limit(10);
+
+    res.json(users);
+  } catch (error) {
+    console.error('❌ Error buscando usuarios:', error);
+    res.status(500).json({ message: 'Error en la búsqueda de usuarios.', error: error.message });
+  }
+});
 
 // ============================================================
 // ⚡ SOCKET.IO — COMENTARIOS, LIKES Y MENSAJES EN TIEMPO REAL
