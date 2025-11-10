@@ -80,6 +80,7 @@ const usuarioSchema = new mongoose.Schema({
   telefono: String,
   password: String,
   profilePic: { type: String, default: "" },
+  bannerImage: { type: String, default: "" },
   bio: { type: String, default: "" },
   
   // ⭐ ÚNICO CAMBIO RECOMENDADO: validar status
@@ -371,14 +372,30 @@ app.put('/profile/status', ensureAuthenticated, async (req, res) => {
   }
 });
 
-app.put('/profile/bio', ensureAuthenticated, async (req, res) => {
+// AÑADIR ESTE ENDPOINT
+app.put('/api/users/me/bio', ensureAuthenticated, async (req, res) => {
   try {
     const { bio } = req.body;
-    const user = await Usuario.findByIdAndUpdate(req.user.id, { bio }, { new: true });
-    res.json({ message: 'Biografía actualizada correctamente', bio: user.bio });
+    
+    if (bio && bio.length > 500) {
+      return res.status(400).json({ message: 'La biografía no puede exceder 500 caracteres.' });
+    }
+
+    const user = await Usuario.findByIdAndUpdate(
+      req.user._id,
+      { bio: bio || '' },
+      { new: true }
+    ).select('username bio profilePic');
+
+    console.log('✅ Biografía actualizada:', user.username);
+    res.json({ 
+      message: 'Biografía actualizada correctamente', 
+      bio: user.bio,
+      user 
+    });
   } catch (error) {
-    console.error('Error actualizando biografía:', error);
-    res.status(500).json({ message: 'Error al actualizar biografía.' });
+    console.error('❌ Error actualizando biografía:', error);
+    res.status(500).json({ message: 'Error al actualizar biografía.', error: error.message });
   }
 });
 
@@ -1553,6 +1570,487 @@ app.get('/api/users/:id/activity', ensureAuthenticated, async (req, res) => {
     res.status(500).json({ 
       message: 'Error obteniendo actividad del usuario.',
       error: err.message 
+    });
+  }
+});
+
+// ============================================================
+// 🎨 BANNER/PORTADA DE PERFIL
+// ============================================================
+
+// Configuración de Cloudinary para banners (después de la config de profile pics)
+const bannerStorage = new CloudinaryStorage({
+  cloudinary: cloudinary.v2,
+  params: {
+    folder: process.env.CLOUDINARY_FOLDER_BANNERS || 'banners',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    transformation: [{ width: 1500, height: 500, crop: 'fill' }],
+  },
+});
+const uploadBanner = multer({ storage: bannerStorage });
+
+// 📤 Subir banner desde archivo
+app.post('/api/users/me/banner', ensureAuthenticated, uploadBanner.single('bannerImage'), async (req, res) => {
+  try {
+    if (!req.file || !req.file.path) {
+      return res.status(400).json({ message: 'No se recibió ninguna imagen.' });
+    }
+
+    const bannerUrl = req.file.path || req.file.secure_url;
+    
+    console.log('🎨 Actualizando banner con archivo:', bannerUrl);
+
+    const updatedUser = await Usuario.findByIdAndUpdate(
+      req.user._id,
+      { bannerImage: bannerUrl },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'Usuario no encontrado.' });
+    }
+
+    console.log('✅ Banner actualizado correctamente');
+    
+    res.json({ 
+      message: 'Banner actualizado correctamente.',
+      bannerImage: updatedUser.bannerImage 
+    });
+  } catch (error) {
+    console.error('❌ Error al subir banner:', error);
+    res.status(500).json({ 
+      message: 'Error al subir banner.',
+      error: error.message 
+    });
+  }
+});
+
+// 🌐 Actualizar banner desde URL
+app.put('/api/users/me/banner-url', ensureAuthenticated, async (req, res) => {
+  try {
+    const { imageUrl } = req.body;
+    
+    if (!imageUrl || !imageUrl.trim()) {
+      return res.status(400).json({ message: 'URL de imagen requerida.' });
+    }
+
+    console.log('🌐 Actualizando banner con URL:', imageUrl);
+
+    // Validar que sea una URL válida
+    try {
+      new URL(imageUrl);
+    } catch (e) {
+      return res.status(400).json({ message: 'URL inválida.' });
+    }
+
+    const updatedUser = await Usuario.findByIdAndUpdate(
+      req.user._id,
+      { bannerImage: imageUrl },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'Usuario no encontrado.' });
+    }
+
+    console.log('✅ Banner actualizado con URL');
+    
+    res.json({ 
+      message: 'Banner actualizado correctamente.',
+      bannerImage: updatedUser.bannerImage 
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando banner con URL:', error);
+    res.status(500).json({ 
+      message: 'Error al actualizar banner.',
+      error: error.message 
+    });
+  }
+});
+
+// ============================================================
+// 👥 SISTEMA COMPLETO DE GRUPOS/COMUNIDADES
+// ============================================================
+
+// Modelo de Grupo (agregar después de los otros modelos, línea ~130)
+const groupSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  slug: { type: String, required: true, unique: true },
+  description: { type: String, default: '' },
+  image: { type: String, default: '' },
+  members: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  admins: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  posts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Post' }],
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
+
+const Group = mongoose.models.Group || mongoose.model('Group', groupSchema);
+
+// 🔹 Crear un nuevo grupo
+app.post('/api/groups/create', ensureAuthenticated, async (req, res) => {
+  try {
+    const { name, description, image } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: 'El nombre del grupo es requerido.' });
+    }
+
+    console.log('✨ Creando nuevo grupo:', name);
+
+    // Generar slug del nombre
+    const slug = name.toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+
+    // Verificar si ya existe
+    const existing = await Group.findOne({ slug });
+    if (existing) {
+      return res.status(400).json({ message: 'Ya existe un grupo con ese nombre.' });
+    }
+
+    const group = await Group.create({
+      name: name.trim(),
+      slug,
+      description: description?.trim() || '',
+      image: image?.trim() || '',
+      members: [req.user._id],
+      admins: [req.user._id],
+      createdBy: req.user._id
+    });
+
+    const populated = await group.populate('createdBy', 'username profilePic');
+
+    console.log('✅ Grupo creado:', group.name);
+
+    res.status(201).json({
+      message: 'Grupo creado exitosamente',
+      group: populated
+    });
+  } catch (error) {
+    console.error('❌ Error creando grupo:', error);
+    res.status(500).json({
+      message: 'Error al crear grupo.',
+      error: error.message
+    });
+  }
+});
+
+// 🔹 Unirse o salir de un grupo
+app.post('/api/groups/:slug/join', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const userId = req.user._id;
+
+    console.log('👥 Usuario intentando unirse/salir del grupo:', slug);
+
+    // Buscar o crear el grupo
+    let group = await Group.findOne({ slug });
+
+    if (!group) {
+      // Crear el grupo si no existe (solo para el grupo Royal UI Force)
+      if (slug === 'royal-ui-force') {
+        group = await Group.create({
+          name: 'ROYAL UI FORCE',
+          slug: 'royal-ui-force',
+          description: 'Comunidad de desarrolladores creativos',
+          members: [],
+          admins: []
+        });
+        console.log('✨ Grupo creado:', group.name);
+      } else {
+        return res.status(404).json({ message: 'Grupo no encontrado.' });
+      }
+    }
+
+    const isMember = group.members.some(
+      memberId => memberId.toString() === userId.toString()
+    );
+
+    if (isMember) {
+      // Salir del grupo
+      group.members.pull(userId);
+      await group.save();
+      
+      console.log(`👋 Usuario salió del grupo: ${group.name}`);
+      
+      res.json({
+        joined: false,
+        memberCount: group.members.length,
+        message: `Has salido del grupo ${group.name}`
+      });
+    } else {
+      // Unirse al grupo
+      group.members.push(userId);
+      await group.save();
+      
+      console.log(`✅ Usuario se unió al grupo: ${group.name}`);
+      
+      res.json({
+        joined: true,
+        memberCount: group.members.length,
+        message: `Te has unido al grupo ${group.name}`
+      });
+    }
+  } catch (error) {
+    console.error('❌ Error en unirse/salir del grupo:', error);
+    res.status(500).json({ 
+      message: 'Error al procesar solicitud del grupo.',
+      error: error.message 
+    });
+  }
+});
+
+// 🔹 Obtener información de un grupo
+app.get('/api/groups/:slug', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    const group = await Group.findOne({ slug })
+      .populate('members', 'username profilePic')
+      .populate('admins', 'username profilePic')
+      .populate('createdBy', 'username profilePic')
+      .lean();
+
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    const isMember = group.members.some(
+      member => member._id.toString() === req.user._id.toString()
+    );
+
+    const isAdmin = group.admins.some(
+      admin => admin._id.toString() === req.user._id.toString()
+    );
+
+    res.json({
+      ...group,
+      isMember,
+      isAdmin,
+      memberCount: group.members.length
+    });
+  } catch (error) {
+    console.error('❌ Error obteniendo grupo:', error);
+    res.status(500).json({ 
+      message: 'Error obteniendo información del grupo.',
+      error: error.message 
+    });
+  }
+});
+
+// 🔹 Listar todos los grupos
+app.get('/api/groups', ensureAuthenticated, async (req, res) => {
+  try {
+    const groups = await Group.find()
+      .select('name slug description image members createdAt')
+      .lean();
+
+    const groupsWithCounts = groups.map(group => ({
+      ...group,
+      memberCount: group.members?.length || 0
+    }));
+
+    console.log(`📋 ${groupsWithCounts.length} grupos encontrados`);
+
+    res.json(groupsWithCounts);
+  } catch (error) {
+    console.error('❌ Error listando grupos:', error);
+    res.status(500).json({ 
+      message: 'Error listando grupos.',
+      error: error.message 
+    });
+  }
+});
+
+// 🔹 Obtener posts de un grupo
+app.get('/api/groups/:slug/posts', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    const group = await Group.findOne({ slug })
+      .populate({
+        path: 'posts',
+        populate: { path: 'author', select: 'username profilePic' }
+      })
+      .lean();
+
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    res.json(group.posts || []);
+  } catch (error) {
+    console.error('❌ Error obteniendo posts del grupo:', error);
+    res.status(500).json({ 
+      message: 'Error obteniendo posts del grupo.',
+      error: error.message 
+    });
+  }
+});
+
+// 🔹 Publicar en un grupo
+app.post('/api/groups/:slug/posts', ensureAuthenticated, uploadPostMedia.array('images', 10), async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { caption = '', visibility = 'public' } = req.body;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    // Verificar que el usuario sea miembro
+    const isMember = group.members.some(
+      memberId => memberId.toString() === req.user._id.toString()
+    );
+
+    if (!isMember) {
+      return res.status(403).json({ message: 'Debes ser miembro para publicar en este grupo.' });
+    }
+
+    const images = (req.files || []).map(f => f.path);
+
+    const post = await Post.create({
+      author: req.user._id,
+      caption: caption.trim(),
+      images,
+      visibility,
+      groupId: group._id
+    });
+
+    // Agregar post al grupo
+    group.posts.push(post._id);
+    await group.save();
+
+    const populated = await post.populate('author', 'username profilePic');
+
+    console.log('✅ Post creado en grupo:', group.name);
+
+    res.status(201).json({ 
+      message: 'Post creado en el grupo',
+      post: populated 
+    });
+  } catch (error) {
+    console.error('❌ Error creando post en grupo:', error);
+    res.status(500).json({ 
+      message: 'Error al crear post en grupo.',
+      error: error.message 
+    });
+  }
+});
+
+// 🔹 Actualizar grupo (solo admins)
+app.put('/api/groups/:slug', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { name, description, image } = req.body;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    // Verificar que el usuario sea admin
+    const isAdmin = group.admins.some(
+      adminId => adminId.toString() === req.user._id.toString()
+    );
+
+    if (!isAdmin) {
+      return res.status(403).json({ message: 'Solo los administradores pueden editar el grupo.' });
+    }
+
+    if (name) group.name = name.trim();
+    if (description !== undefined) group.description = description.trim();
+    if (image !== undefined) group.image = image.trim();
+
+    // Si cambió el nombre, regenerar slug
+    if (name) {
+      group.slug = name.toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    }
+
+    await group.save();
+
+    console.log('✅ Grupo actualizado:', group.name);
+
+    res.json({
+      message: 'Grupo actualizado correctamente',
+      group
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando grupo:', error);
+    res.status(500).json({ 
+      message: 'Error al actualizar grupo.',
+      error: error.message 
+    });
+  }
+});
+
+// 🔹 Eliminar grupo (solo creador)
+app.delete('/api/groups/:slug', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    // Verificar que el usuario sea el creador
+    if (group.createdBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Solo el creador puede eliminar el grupo.' });
+    }
+
+    await Group.findByIdAndDelete(group._id);
+
+    console.log('✅ Grupo eliminado:', group.name);
+
+    res.json({ message: 'Grupo eliminado correctamente' });
+  } catch (error) {
+    console.error('❌ Error eliminando grupo:', error);
+    res.status(500).json({ 
+      message: 'Error al eliminar grupo.',
+      error: error.message 
+    });
+  }
+});
+
+// 🔹 Agregar/Remover admin (solo creador)
+app.post('/api/groups/:slug/admins/:userId', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug, userId } = req.params;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    // Verificar que el usuario sea el creador
+    if (group.createdBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Solo el creador puede gestionar administradores.' });
+    }
+
+    const isAdmin = group.admins.some(
+      adminId => adminId.toString() === userId
+    );
+
+    if (isAdmin) {
+      // Remover admin
+      group.admins.pull(userId);
+      await group.save();
+      res.json({ message: 'Administrador removido', isAdmin: false });
+    } else {
+      // Agregar admin
+      group.admins.push(userId);
+      await group.save();
+      res.json({ message: 'Administrador agregado', isAdmin: true });
+    }
+  } catch (error) {
+    console.error('❌ Error gestionando admin:', error);
+    res.status(500).json({ 
+      message: 'Error al gestionar administrador.',
+      error: error.message 
     });
   }
 });
