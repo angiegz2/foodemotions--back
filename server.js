@@ -69,6 +69,17 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage });
 
+// Configuración de Cloudinary para backgrounds
+const backgroundStorage = new CloudinaryStorage({
+  cloudinary: cloudinary.v2,
+  params: {
+    folder: process.env.CLOUDINARY_FOLDER_BACKGROUNDS || 'backgrounds',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    transformation: [{ width: 1920, height: 1080, crop: 'fill' }],
+  },
+});
+const uploadBackground = multer({ storage: backgroundStorage });
+
 // ============================================================
 // 📦 MODELOS MONGOOSE — FoodEmotions Social + Chat + IA
 // ============================================================
@@ -81,6 +92,10 @@ const usuarioSchema = new mongoose.Schema({
   password: String,
   profilePic: { type: String, default: "" },
   bannerImage: { type: String, default: "" },
+  backgroundImage: { type: String, default: "" },
+  interests: [String],
+  notificationsEnabled: { type: Boolean, default: true },
+  preferredLanguage: { type: String, default: 'es' },
   bio: { type: String, default: "" },
   
   // ⭐ ÚNICO CAMBIO RECOMENDADO: validar status
@@ -176,6 +191,98 @@ const chatSessionSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const ChatSession = mongoose.models.ChatSession || mongoose.model("ChatSession", chatSessionSchema);
+
+const collectionSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  description: { type: String, default: '' },
+  owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  recipes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Recipe' }],
+  isPublic: { type: Boolean, default: true },
+  coverImage: { type: String, default: '' }
+}, { timestamps: true });
+
+const Collection = mongoose.models.Collection || mongoose.model('Collection', collectionSchema);
+
+// Modelo de Archivo Personal
+const fileSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  description: { type: String, default: '' },
+  fileUrl: { type: String, required: true },
+  fileType: { type: String, required: true }, // pdf, doc, image, etc
+  size: { type: Number }, // en bytes
+  owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  tags: [String],
+  isPublic: { type: Boolean, default: false }
+}, { timestamps: true });
+
+const File = mongoose.models.File || mongoose.model('File', fileSchema);
+
+// Configuración de Cloudinary para archivos
+const fileStorage = new CloudinaryStorage({
+  cloudinary: cloudinary.v2,
+  params: {
+    folder: process.env.CLOUDINARY_FOLDER_FILES || 'user_files',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'pdf', 'doc', 'docx', 'txt'],
+    resource_type: 'auto'
+  },
+});
+const uploadFile = multer({ storage: fileStorage });
+
+// Modelo de Entrada de Blog
+const blogPostSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  content: { type: String, required: true },
+  excerpt: { type: String, default: '' },
+  coverImage: { type: String, default: '' },
+  author: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  tags: [String],
+  category: { type: String, default: 'General' },
+  isPublished: { type: Boolean, default: false },
+  publishedAt: { type: Date },
+  views: { type: Number, default: 0 },
+  likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
+}, { timestamps: true });
+
+const BlogPost = mongoose.models.BlogPost || mongoose.model('BlogPost', blogPostSchema);
+
+// Modelo de Configuración de Perfil
+const profileSettingsSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+  privacy: {
+    showEmail: { type: Boolean, default: false },
+    showPhone: { type: Boolean, default: false },
+    allowMessages: { type: String, enum: ['everyone', 'followers', 'none'], default: 'everyone' },
+    showActivity: { type: Boolean, default: true },
+    showLocation: { type: Boolean, default: false }
+  },
+  display: {
+    showBlog: { type: Boolean, default: true },
+    showFiles: { type: Boolean, default: true },
+    showCollections: { type: Boolean, default: true },
+    showGroups: { type: Boolean, default: true },
+    showRecipes: { type: Boolean, default: true },
+    profileTheme: { type: String, default: 'default' },
+    customColors: {
+      primary: { type: String, default: '#3b82f6' },
+      secondary: { type: String, default: '#8b5cf6' }
+    }
+  },
+  notifications: {
+    emailNotifications: { type: Boolean, default: true },
+    pushNotifications: { type: Boolean, default: true },
+    notifyOnLike: { type: Boolean, default: true },
+    notifyOnComment: { type: Boolean, default: true },
+    notifyOnFollow: { type: Boolean, default: true },
+    notifyOnMessage: { type: Boolean, default: true }
+  },
+  content: {
+    language: { type: String, default: 'es' },
+    contentFilter: { type: Boolean, default: true },
+    autoSave: { type: Boolean, default: true }
+  }
+}, { timestamps: true });
+
+const ProfileSettings = mongoose.models.ProfileSettings || mongoose.model('ProfileSettings', profileSettingsSchema);
 
 // ============================================================
 // 🆕 NUEVOS MODELOS: Notifications, Stories y Location
@@ -396,6 +503,85 @@ app.put('/api/users/me/bio', ensureAuthenticated, async (req, res) => {
   } catch (error) {
     console.error('❌ Error actualizando biografía:', error);
     res.status(500).json({ message: 'Error al actualizar biografía.', error: error.message });
+  }
+});
+
+// 📤 Subir background desde archivo
+app.post('/api/users/me/background', ensureAuthenticated, uploadBackground.single('backgroundImage'), async (req, res) => {
+  try {
+    if (!req.file || !req.file.path) {
+      return res.status(400).json({ message: 'No se recibió ninguna imagen.' });
+    }
+
+    const backgroundUrl = req.file.path || req.file.secure_url;
+    
+    console.log('🎨 Actualizando background con archivo:', backgroundUrl);
+
+    const updatedUser = await Usuario.findByIdAndUpdate(
+      req.user._id,
+      { backgroundImage: backgroundUrl },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'Usuario no encontrado.' });
+    }
+
+    console.log('✅ Background actualizado correctamente');
+    
+    res.json({ 
+      message: 'Background actualizado correctamente.',
+      backgroundImage: updatedUser.backgroundImage 
+    });
+  } catch (error) {
+    console.error('❌ Error al subir background:', error);
+    res.status(500).json({ 
+      message: 'Error al subir background.',
+      error: error.message 
+    });
+  }
+});
+
+// 🌐 Actualizar background desde URL
+app.put('/api/users/me/background-url', ensureAuthenticated, async (req, res) => {
+  try {
+    const { imageUrl } = req.body;
+    
+    if (!imageUrl || !imageUrl.trim()) {
+      return res.status(400).json({ message: 'URL de imagen requerida.' });
+    }
+
+    console.log('🌐 Actualizando background con URL:', imageUrl);
+
+    // Validar que sea una URL válida
+    try {
+      new URL(imageUrl);
+    } catch (e) {
+      return res.status(400).json({ message: 'URL inválida.' });
+    }
+
+    const updatedUser = await Usuario.findByIdAndUpdate(
+      req.user._id,
+      { backgroundImage: imageUrl },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'Usuario no encontrado.' });
+    }
+
+    console.log('✅ Background actualizado con URL');
+    
+    res.json({ 
+      message: 'Background actualizado correctamente.',
+      backgroundImage: updatedUser.backgroundImage 
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando background con URL:', error);
+    res.status(500).json({ 
+      message: 'Error al actualizar background.',
+      error: error.message 
+    });
   }
 });
 
@@ -1259,6 +1445,153 @@ app.get('/api/users/:id/saved-posts', ensureAuthenticated, async (req, res) => {
   }
 });
 
+// 🔹 Obtener configuración de perfil
+app.get('/api/profile/settings', ensureAuthenticated, async (req, res) => {
+  try {
+    let settings = await ProfileSettings.findOne({ user: req.user._id });
+
+    // Si no existe, crear configuración por defecto
+    if (!settings) {
+      settings = await ProfileSettings.create({
+        user: req.user._id
+      });
+    }
+
+    console.log('⚙️ Configuración de perfil obtenida');
+    res.json(settings);
+  } catch (error) {
+    console.error('❌ Error obteniendo configuración:', error);
+    res.status(500).json({ message: 'Error obteniendo configuración.' });
+  }
+});
+
+// 🔹 Actualizar configuración de perfil
+app.put('/api/profile/settings', ensureAuthenticated, async (req, res) => {
+  try {
+    const { privacy, display, notifications, content } = req.body;
+
+    let settings = await ProfileSettings.findOne({ user: req.user._id });
+
+    if (!settings) {
+      settings = await ProfileSettings.create({
+        user: req.user._id,
+        privacy,
+        display,
+        notifications,
+        content
+      });
+    } else {
+      if (privacy) settings.privacy = { ...settings.privacy, ...privacy };
+      if (display) settings.display = { ...settings.display, ...display };
+      if (notifications) settings.notifications = { ...settings.notifications, ...notifications };
+      if (content) settings.content = { ...settings.content, ...content };
+
+      await settings.save();
+    }
+
+    console.log('✅ Configuración actualizada');
+    res.json({
+      message: 'Configuración actualizada correctamente',
+      settings
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando configuración:', error);
+    res.status(500).json({ message: 'Error actualizando configuración.' });
+  }
+});
+
+// 🔹 Actualizar tema del perfil
+app.put('/api/profile/theme', ensureAuthenticated, async (req, res) => {
+  try {
+    const { theme, primaryColor, secondaryColor } = req.body;
+
+    let settings = await ProfileSettings.findOne({ user: req.user._id });
+
+    if (!settings) {
+      settings = await ProfileSettings.create({ user: req.user._id });
+    }
+
+    if (theme) settings.display.profileTheme = theme;
+    if (primaryColor) settings.display.customColors.primary = primaryColor;
+    if (secondaryColor) settings.display.customColors.secondary = secondaryColor;
+
+    await settings.save();
+
+    console.log('🎨 Tema actualizado');
+    res.json({
+      message: 'Tema actualizado correctamente',
+      theme: settings.display
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando tema:', error);
+    res.status(500).json({ message: 'Error actualizando tema.' });
+  }
+});
+
+// 🔹 Obtener perfil público con configuración de privacidad
+app.get('/api/users/:id/public-profile-full', async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const requesterId = req.user?._id;
+
+    const user = await Usuario.findById(userId)
+      .select('username profilePic bannerImage bio status followers following createdAt')
+      .lean();
+
+    if (!user) {
+      return res.status(404).json({ message: 'Usuario no encontrado.' });
+    }
+
+    // Obtener configuración de privacidad
+    const settings = await ProfileSettings.findOne({ user: userId });
+
+    // Aplicar configuración de privacidad
+    const publicProfile = {
+      _id: user._id,
+      username: user.username,
+      profilePic: user.profilePic,
+      bannerImage: user.bannerImage,
+      bio: user.bio,
+      status: user.status,
+      memberSince: user.createdAt,
+      stats: {
+        followers: user.followers?.length || 0,
+        following: user.following?.length || 0
+      }
+    };
+
+    // Mostrar elementos según configuración
+    if (settings) {
+      publicProfile.showBlog = settings.display.showBlog;
+      publicProfile.showFiles = settings.display.showFiles;
+      publicProfile.showCollections = settings.display.showCollections;
+      publicProfile.showGroups = settings.display.showGroups;
+      publicProfile.showRecipes = settings.display.showRecipes;
+      publicProfile.theme = settings.display.profileTheme;
+      publicProfile.colors = settings.display.customColors;
+
+      // Solo mostrar actividad si está permitido
+      if (settings.privacy.showActivity) {
+        const postsCount = await Post.countDocuments({ author: userId });
+        publicProfile.stats.posts = postsCount;
+      }
+    }
+
+    // Verificar si el usuario que solicita es seguidor
+    const isFollowing = requesterId && user.followers?.some(
+      id => id.toString() === requesterId.toString()
+    );
+    publicProfile.isFollowing = isFollowing || false;
+
+    console.log('👤 Perfil público completo obtenido');
+    res.json(publicProfile);
+  } catch (error) {
+    console.error('❌ Error obteniendo perfil público:', error);
+    res.status(500).json({ message: 'Error obteniendo perfil.' });
+  }
+});
+
+
 // ============================================================
 // 📩 NOTIFICACIONES
 // ============================================================
@@ -1574,6 +1907,128 @@ app.get('/api/users/:id/activity', ensureAuthenticated, async (req, res) => {
   }
 });
 
+// 🔹 Subir archivo
+app.post('/api/files/upload', ensureAuthenticated, uploadFile.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: 'No se recibió ningún archivo.' });
+    }
+
+    const { name, description, tags, isPublic } = req.body;
+
+    const file = await File.create({
+      name: name || req.file.originalname,
+      description: description || '',
+      fileUrl: req.file.path,
+      fileType: req.file.mimetype,
+      size: req.file.size,
+      owner: req.user._id,
+      tags: tags ? JSON.parse(tags) : [],
+      isPublic: isPublic === 'true'
+    });
+
+    console.log('✅ Archivo subido:', file.name);
+    res.status(201).json({
+      message: 'Archivo subido correctamente',
+      file
+    });
+  } catch (error) {
+    console.error('❌ Error subiendo archivo:', error);
+    res.status(500).json({ message: 'Error subiendo archivo.' });
+  }
+});
+
+// 🔹 Obtener archivos del usuario
+app.get('/api/files', ensureAuthenticated, async (req, res) => {
+  try {
+    const files = await File.find({ owner: req.user._id })
+      .sort({ createdAt: -1 });
+
+    console.log(`📁 ${files.length} archivos encontrados`);
+    res.json(files);
+  } catch (error) {
+    console.error('❌ Error obteniendo archivos:', error);
+    res.status(500).json({ message: 'Error obteniendo archivos.' });
+  }
+});
+
+// 🔹 Obtener un archivo específico
+app.get('/api/files/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const file = await File.findById(req.params.id);
+
+    if (!file) {
+      return res.status(404).json({ message: 'Archivo no encontrado.' });
+    }
+
+    // Verificar permisos
+    if (!file.isPublic && file.owner.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para ver este archivo.' });
+    }
+
+    res.json(file);
+  } catch (error) {
+    console.error('❌ Error obteniendo archivo:', error);
+    res.status(500).json({ message: 'Error obteniendo archivo.' });
+  }
+});
+
+// 🔹 Actualizar archivo
+app.put('/api/files/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const { name, description, tags, isPublic } = req.body;
+    
+    const file = await File.findById(req.params.id);
+    if (!file) {
+      return res.status(404).json({ message: 'Archivo no encontrado.' });
+    }
+
+    // Verificar que el usuario sea el propietario
+    if (file.owner.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para editar este archivo.' });
+    }
+
+    if (name) file.name = name;
+    if (description !== undefined) file.description = description;
+    if (tags) file.tags = tags;
+    if (isPublic !== undefined) file.isPublic = isPublic;
+
+    await file.save();
+
+    console.log('✅ Archivo actualizado:', file.name);
+    res.json({
+      message: 'Archivo actualizado correctamente',
+      file
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando archivo:', error);
+    res.status(500).json({ message: 'Error actualizando archivo.' });
+  }
+});
+
+// 🔹 Eliminar archivo
+app.delete('/api/files/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const file = await File.findById(req.params.id);
+    if (!file) {
+      return res.status(404).json({ message: 'Archivo no encontrado.' });
+    }
+
+    // Verificar que el usuario sea el propietario
+    if (file.owner.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para eliminar este archivo.' });
+    }
+
+    await File.findByIdAndDelete(req.params.id);
+
+    console.log('✅ Archivo eliminado:', file.name);
+    res.json({ message: 'Archivo eliminado correctamente' });
+  } catch (error) {
+    console.error('❌ Error eliminando archivo:', error);
+    res.status(500).json({ message: 'Error eliminando archivo.' });
+  }
+});
+
 // ============================================================
 // 🎨 BANNER/PORTADA DE PERFIL
 // ============================================================
@@ -1668,11 +2123,392 @@ app.put('/api/users/me/banner-url', ensureAuthenticated, async (req, res) => {
   }
 });
 
+// 🔹 Crear una colección
+app.post('/api/collections', ensureAuthenticated, async (req, res) => {
+  try {
+    const { name, description, isPublic, coverImage } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ message: 'El nombre de la colección es requerido.' });
+    }
+
+    console.log('📚 Creando nueva colección:', name);
+
+    const collection = await Collection.create({
+      name: name.trim(),
+      description: description?.trim() || '',
+      owner: req.user._id,
+      isPublic: isPublic !== undefined ? isPublic : true,
+      coverImage: coverImage?.trim() || ''
+    });
+
+    const populated = await collection.populate('owner', 'username profilePic');
+
+    console.log('✅ Colección creada:', collection.name);
+    res.status(201).json({
+      message: 'Colección creada exitosamente',
+      collection: populated
+    });
+  } catch (error) {
+    console.error('❌ Error creando colección:', error);
+    res.status(500).json({
+      message: 'Error al crear colección.',
+      error: error.message
+    });
+  }
+});
+
+// 🔹 Obtener todas las colecciones del usuario
+app.get('/api/collections', ensureAuthenticated, async (req, res) => {
+  try {
+    const collections = await Collection.find({ owner: req.user._id })
+      .populate('recipes')
+      .populate('owner', 'username profilePic')
+      .sort({ createdAt: -1 });
+
+    const collectionsWithCount = collections.map(col => ({
+      ...col.toObject(),
+      recipeCount: col.recipes?.length || 0
+    }));
+
+    console.log(`📚 ${collectionsWithCount.length} colecciones encontradas`);
+    res.json(collectionsWithCount);
+  } catch (error) {
+    console.error('❌ Error obteniendo colecciones:', error);
+    res.status(500).json({ message: 'Error obteniendo colecciones.' });
+  }
+});
+
+// 🔹 Obtener una colección específica
+app.get('/api/collections/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const collection = await Collection.findById(req.params.id)
+      .populate('recipes')
+      .populate('owner', 'username profilePic');
+
+    if (!collection) {
+      return res.status(404).json({ message: 'Colección no encontrada.' });
+    }
+
+    // Verificar permisos
+    if (!collection.isPublic && collection.owner._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para ver esta colección.' });
+    }
+
+    res.json(collection);
+  } catch (error) {
+    console.error('❌ Error obteniendo colección:', error);
+    res.status(500).json({ message: 'Error obteniendo colección.' });
+  }
+});
+
+// 🔹 Actualizar una colección
+app.put('/api/collections/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const { name, description, isPublic, coverImage } = req.body;
+    
+    const collection = await Collection.findById(req.params.id);
+    if (!collection) {
+      return res.status(404).json({ message: 'Colección no encontrada.' });
+    }
+
+    // Verificar que el usuario sea el propietario
+    if (collection.owner.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para editar esta colección.' });
+    }
+
+    if (name) collection.name = name.trim();
+    if (description !== undefined) collection.description = description.trim();
+    if (isPublic !== undefined) collection.isPublic = isPublic;
+    if (coverImage !== undefined) collection.coverImage = coverImage.trim();
+
+    await collection.save();
+
+    console.log('✅ Colección actualizada:', collection.name);
+    res.json({
+      message: 'Colección actualizada correctamente',
+      collection
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando colección:', error);
+    res.status(500).json({ message: 'Error actualizando colección.' });
+  }
+});
+
+// 🔹 Eliminar una colección
+app.delete('/api/collections/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const collection = await Collection.findById(req.params.id);
+    if (!collection) {
+      return res.status(404).json({ message: 'Colección no encontrada.' });
+    }
+
+    // Verificar que el usuario sea el propietario
+    if (collection.owner.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para eliminar esta colección.' });
+    }
+
+    await Collection.findByIdAndDelete(req.params.id);
+
+    console.log('✅ Colección eliminada:', collection.name);
+    res.json({ message: 'Colección eliminada correctamente' });
+  } catch (error) {
+    console.error('❌ Error eliminando colección:', error);
+    res.status(500).json({ message: 'Error eliminando colección.' });
+  }
+});
+
+// 🔹 Agregar receta a una colección
+app.post('/api/collections/:id/recipes/:recipeId', ensureAuthenticated, async (req, res) => {
+  try {
+    const { id, recipeId } = req.params;
+    
+    const collection = await Collection.findById(id);
+    if (!collection) {
+      return res.status(404).json({ message: 'Colección no encontrada.' });
+    }
+
+    // Verificar que el usuario sea el propietario
+    if (collection.owner.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para modificar esta colección.' });
+    }
+
+    // Verificar que la receta existe
+    const recipe = await Recipe.findById(recipeId);
+    if (!recipe) {
+      return res.status(404).json({ message: 'Receta no encontrada.' });
+    }
+
+    // Verificar si ya está en la colección
+    if (collection.recipes.includes(recipeId)) {
+      return res.status(400).json({ message: 'La receta ya está en esta colección.' });
+    }
+
+    collection.recipes.push(recipeId);
+    await collection.save();
+
+    console.log('✅ Receta agregada a colección');
+    res.json({
+      message: 'Receta agregada a la colección',
+      collection
+    });
+  } catch (error) {
+    console.error('❌ Error agregando receta a colección:', error);
+    res.status(500).json({ message: 'Error agregando receta.' });
+  }
+});
+
+// 🔹 Remover receta de una colección
+app.delete('/api/collections/:id/recipes/:recipeId', ensureAuthenticated, async (req, res) => {
+  try {
+    const { id, recipeId } = req.params;
+    
+    const collection = await Collection.findById(id);
+    if (!collection) {
+      return res.status(404).json({ message: 'Colección no encontrada.' });
+    }
+
+    // Verificar que el usuario sea el propietario
+    if (collection.owner.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para modificar esta colección.' });
+    }
+
+    collection.recipes.pull(recipeId);
+    await collection.save();
+
+    console.log('✅ Receta removida de colección');
+    res.json({
+      message: 'Receta removida de la colección',
+      collection
+    });
+  } catch (error) {
+    console.error('❌ Error removiendo receta:', error);
+    res.status(500).json({ message: 'Error removiendo receta.' });
+  }
+});
+
+// 🔹 Crear entrada de blog
+app.post('/api/blog', ensureAuthenticated, async (req, res) => {
+  try {
+    const { title, content, excerpt, coverImage, tags, category, isPublished } = req.body;
+
+    if (!title || !content) {
+      return res.status(400).json({ message: 'Título y contenido son requeridos.' });
+    }
+
+    const blogPost = await BlogPost.create({
+      title: title.trim(),
+      content: content.trim(),
+      excerpt: excerpt?.trim() || content.substring(0, 150) + '...',
+      coverImage: coverImage?.trim() || '',
+      author: req.user._id,
+      tags: tags || [],
+      category: category || 'General',
+      isPublished: isPublished || false,
+      publishedAt: isPublished ? new Date() : null
+    });
+
+    const populated = await blogPost.populate('author', 'username profilePic');
+
+    console.log('✅ Entrada de blog creada:', blogPost.title);
+    res.status(201).json({
+      message: 'Entrada de blog creada exitosamente',
+      blogPost: populated
+    });
+  } catch (error) {
+    console.error('❌ Error creando entrada de blog:', error);
+    res.status(500).json({ message: 'Error creando entrada de blog.' });
+  }
+});
+
+// 🔹 Obtener todas las entradas del blog del usuario
+app.get('/api/blog', ensureAuthenticated, async (req, res) => {
+  try {
+    const blogPosts = await BlogPost.find({ author: req.user._id })
+      .populate('author', 'username profilePic')
+      .sort({ createdAt: -1 });
+
+    console.log(`📝 ${blogPosts.length} entradas de blog encontradas`);
+    res.json(blogPosts);
+  } catch (error) {
+    console.error('❌ Error obteniendo blog:', error);
+    res.status(500).json({ message: 'Error obteniendo entradas de blog.' });
+  }
+});
+
+// 🔹 Obtener entradas públicas de un usuario específico
+app.get('/api/blog/user/:userId', async (req, res) => {
+  try {
+    const blogPosts = await BlogPost.find({ 
+      author: req.params.userId,
+      isPublished: true 
+    })
+      .populate('author', 'username profilePic')
+      .sort({ publishedAt: -1 });
+
+    res.json(blogPosts);
+  } catch (error) {
+    console.error('❌ Error obteniendo blog público:', error);
+    res.status(500).json({ message: 'Error obteniendo entradas de blog.' });
+  }
+});
+
+// 🔹 Obtener una entrada específica del blog
+app.get('/api/blog/:id', async (req, res) => {
+  try {
+    const blogPost = await BlogPost.findById(req.params.id)
+      .populate('author', 'username profilePic');
+
+    if (!blogPost) {
+      return res.status(404).json({ message: 'Entrada no encontrada.' });
+    }
+
+    // Incrementar vistas
+    blogPost.views += 1;
+    await blogPost.save();
+
+    res.json(blogPost);
+  } catch (error) {
+    console.error('❌ Error obteniendo entrada de blog:', error);
+    res.status(500).json({ message: 'Error obteniendo entrada de blog.' });
+  }
+});
+
+// 🔹 Actualizar entrada de blog
+app.put('/api/blog/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const { title, content, excerpt, coverImage, tags, category, isPublished } = req.body;
+    
+    const blogPost = await BlogPost.findById(req.params.id);
+    if (!blogPost) {
+      return res.status(404).json({ message: 'Entrada no encontrada.' });
+    }
+
+    // Verificar que el usuario sea el autor
+    if (blogPost.author.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para editar esta entrada.' });
+    }
+
+    if (title) blogPost.title = title.trim();
+    if (content) blogPost.content = content.trim();
+    if (excerpt !== undefined) blogPost.excerpt = excerpt.trim();
+    if (coverImage !== undefined) blogPost.coverImage = coverImage.trim();
+    if (tags) blogPost.tags = tags;
+    if (category) blogPost.category = category;
+    
+    // Si se publica por primera vez
+    if (isPublished && !blogPost.isPublished) {
+      blogPost.publishedAt = new Date();
+    }
+    if (isPublished !== undefined) blogPost.isPublished = isPublished;
+
+    await blogPost.save();
+
+    console.log('✅ Entrada de blog actualizada:', blogPost.title);
+    res.json({
+      message: 'Entrada actualizada correctamente',
+      blogPost
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando entrada de blog:', error);
+    res.status(500).json({ message: 'Error actualizando entrada.' });
+  }
+});
+
+// 🔹 Eliminar entrada de blog
+app.delete('/api/blog/:id', ensureAuthenticated, async (req, res) => {
+  try {
+    const blogPost = await BlogPost.findById(req.params.id);
+    if (!blogPost) {
+      return res.status(404).json({ message: 'Entrada no encontrada.' });
+    }
+
+    // Verificar que el usuario sea el autor
+    if (blogPost.author.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No tienes permiso para eliminar esta entrada.' });
+    }
+
+    await BlogPost.findByIdAndDelete(req.params.id);
+
+    console.log('✅ Entrada de blog eliminada:', blogPost.title);
+    res.json({ message: 'Entrada eliminada correctamente' });
+  } catch (error) {
+    console.error('❌ Error eliminando entrada de blog:', error);
+    res.status(500).json({ message: 'Error eliminando entrada.' });
+  }
+});
+
+// 🔹 Dar like a entrada de blog
+app.post('/api/blog/:id/like', ensureAuthenticated, async (req, res) => {
+  try {
+    const blogPost = await BlogPost.findById(req.params.id);
+    if (!blogPost) {
+      return res.status(404).json({ message: 'Entrada no encontrada.' });
+    }
+
+    const userId = req.user._id.toString();
+    const idx = blogPost.likes.findIndex(u => u.toString() === userId);
+
+    let liked = false;
+    if (idx >= 0) {
+      blogPost.likes.splice(idx, 1);
+    } else {
+      blogPost.likes.push(req.user._id);
+      liked = true;
+    }
+    await blogPost.save();
+
+    res.json({ liked, likesCount: blogPost.likes.length });
+  } catch (error) {
+    console.error('❌ Error con like en blog:', error);
+    res.status(500).json({ message: 'Error al dar like.' });
+  }
+});
+
 // ============================================================
 // 👥 SISTEMA COMPLETO DE GRUPOS/COMUNIDADES
 // ============================================================
 
-// Modelo de Grupo (agregar después de los otros modelos, línea ~130)
 const groupSchema = new mongoose.Schema({
   name: { type: String, required: true, unique: true },
   slug: { type: String, required: true, unique: true },
@@ -1687,7 +2523,7 @@ const groupSchema = new mongoose.Schema({
 const Group = mongoose.models.Group || mongoose.model('Group', groupSchema);
 
 // 🔹 Crear un nuevo grupo
-app.post('/api/groups/create', ensureAuthenticated, async (req, res) => {
+app.post('/api/groups', ensureAuthenticated, async (req, res) => {
   try {
     const { name, description, image } = req.body;
 
@@ -1699,13 +2535,17 @@ app.post('/api/groups/create', ensureAuthenticated, async (req, res) => {
 
     // Generar slug del nombre
     const slug = name.toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // Remover acentos
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '');
 
     // Verificar si ya existe
     const existing = await Group.findOne({ slug });
     if (existing) {
-      return res.status(400).json({ message: 'Ya existe un grupo con ese nombre.' });
+      return res.status(400).json({ 
+        message: 'Ya existe un grupo con ese nombre.',
+        suggestion: `${slug}-${Date.now().toString().slice(-4)}` // Sugerir alternativa
+      });
     }
 
     const group = await Group.create({
@@ -1715,12 +2555,13 @@ app.post('/api/groups/create', ensureAuthenticated, async (req, res) => {
       image: image?.trim() || '',
       members: [req.user._id],
       admins: [req.user._id],
-      createdBy: req.user._id
+      createdBy: req.user._id,
+      posts: []
     });
 
     const populated = await group.populate('createdBy', 'username profilePic');
 
-    console.log('✅ Grupo creado:', group.name);
+    console.log('✅ Grupo creado:', group.name, '| Slug:', group.slug);
 
     res.status(201).json({
       message: 'Grupo creado exitosamente',
@@ -1735,78 +2576,57 @@ app.post('/api/groups/create', ensureAuthenticated, async (req, res) => {
   }
 });
 
-// 🔹 Unirse o salir de un grupo
-app.post('/api/groups/:slug/join', ensureAuthenticated, async (req, res) => {
+// 🔹 Listar todos los grupos (públicos)
+app.get('/api/groups', ensureAuthenticated, async (req, res) => {
   try {
-    const { slug } = req.params;
-    const userId = req.user._id;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
 
-    console.log('👥 Usuario intentando unirse/salir del grupo:', slug);
+    const groups = await Group.find()
+      .select('name slug description image members createdAt')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
 
-    // Buscar o crear el grupo
-    let group = await Group.findOne({ slug });
+    const total = await Group.countDocuments();
 
-    if (!group) {
-      // Crear el grupo si no existe (solo para el grupo Royal UI Force)
-      if (slug === 'royal-ui-force') {
-        group = await Group.create({
-          name: 'ROYAL UI FORCE',
-          slug: 'royal-ui-force',
-          description: 'Comunidad de desarrolladores creativos',
-          members: [],
-          admins: []
-        });
-        console.log('✨ Grupo creado:', group.name);
-      } else {
-        return res.status(404).json({ message: 'Grupo no encontrado.' });
+    const groupsWithInfo = groups.map(group => ({
+      ...group,
+      memberCount: group.members?.length || 0,
+      isMember: group.members?.some(m => m.toString() === req.user._id.toString()) || false
+    }));
+
+    console.log(`📋 ${groupsWithInfo.length} grupos encontrados (página ${page})`);
+
+    res.json({
+      groups: groupsWithInfo,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
       }
-    }
-
-    const isMember = group.members.some(
-      memberId => memberId.toString() === userId.toString()
-    );
-
-    if (isMember) {
-      // Salir del grupo
-      group.members.pull(userId);
-      await group.save();
-      
-      console.log(`👋 Usuario salió del grupo: ${group.name}`);
-      
-      res.json({
-        joined: false,
-        memberCount: group.members.length,
-        message: `Has salido del grupo ${group.name}`
-      });
-    } else {
-      // Unirse al grupo
-      group.members.push(userId);
-      await group.save();
-      
-      console.log(`✅ Usuario se unió al grupo: ${group.name}`);
-      
-      res.json({
-        joined: true,
-        memberCount: group.members.length,
-        message: `Te has unido al grupo ${group.name}`
-      });
-    }
+    });
   } catch (error) {
-    console.error('❌ Error en unirse/salir del grupo:', error);
+    console.error('❌ Error listando grupos:', error);
     res.status(500).json({ 
-      message: 'Error al procesar solicitud del grupo.',
+      message: 'Error listando grupos.',
       error: error.message 
     });
   }
 });
 
-// 🔹 Obtener información de un grupo
+// 🔹 Obtener información de un grupo específico
 app.get('/api/groups/:slug', ensureAuthenticated, async (req, res) => {
   try {
     const { slug } = req.params;
     
+    console.log('🔍 Buscando grupo con slug:', slug);
+    
     const group = await Group.findOne({ slug })
-      .populate('members', 'username profilePic')
+      .populate('members', 'username profilePic status')
       .populate('admins', 'username profilePic')
       .populate('createdBy', 'username profilePic')
       .lean();
@@ -1823,12 +2643,16 @@ app.get('/api/groups/:slug', ensureAuthenticated, async (req, res) => {
       admin => admin._id.toString() === req.user._id.toString()
     );
 
-    res.json({
+    const response = {
       ...group,
       isMember,
       isAdmin,
-      memberCount: group.members.length
-    });
+      memberCount: group.members.length,
+      postCount: group.posts?.length || 0
+    };
+
+    console.log('✅ Grupo encontrado:', group.name);
+    res.json(response);
   } catch (error) {
     console.error('❌ Error obteniendo grupo:', error);
     res.status(500).json({ 
@@ -1838,25 +2662,156 @@ app.get('/api/groups/:slug', ensureAuthenticated, async (req, res) => {
   }
 });
 
-// 🔹 Listar todos los grupos
-app.get('/api/groups', ensureAuthenticated, async (req, res) => {
+// 🔹 Unirse o salir de un grupo
+app.post('/api/groups/:slug/join', ensureAuthenticated, async (req, res) => {
   try {
-    const groups = await Group.find()
-      .select('name slug description image members createdAt')
-      .lean();
+    const { slug } = req.params;
+    const userId = req.user._id;
 
-    const groupsWithCounts = groups.map(group => ({
-      ...group,
-      memberCount: group.members?.length || 0
-    }));
+    console.log('👥 Usuario', req.user.username, 'intentando unirse/salir del grupo:', slug);
 
-    console.log(`📋 ${groupsWithCounts.length} grupos encontrados`);
+    let group = await Group.findOne({ slug });
 
-    res.json(groupsWithCounts);
+    if (!group) {
+      // Solo crear automáticamente el grupo "royal-ui-force"
+      if (slug === 'royal-ui-force') {
+        group = await Group.create({
+          name: 'ROYAL UI FORCE',
+          slug: 'royal-ui-force',
+          description: 'Comunidad oficial de desarrolladores creativos',
+          image: 'https://res.cloudinary.com/demo/image/upload/sample.jpg',
+          members: [userId],
+          admins: [userId],
+          createdBy: userId,
+          posts: []
+        });
+        console.log('✨ Grupo "royal-ui-force" creado automáticamente');
+        
+        return res.json({
+          joined: true,
+          memberCount: 1,
+          message: `Te has unido al grupo ${group.name}`
+        });
+      } else {
+        return res.status(404).json({ message: 'Grupo no encontrado.' });
+      }
+    }
+
+    const isMember = group.members.some(
+      memberId => memberId.toString() === userId.toString()
+    );
+
+    if (isMember) {
+      // Salir del grupo
+      group.members.pull(userId);
+      // Si era admin, también removerlo de admins
+      if (group.admins.includes(userId)) {
+        group.admins.pull(userId);
+      }
+      await group.save();
+      
+      console.log(`👋 ${req.user.username} salió del grupo: ${group.name}`);
+      
+      res.json({
+        joined: false,
+        memberCount: group.members.length,
+        message: `Has salido del grupo ${group.name}`
+      });
+    } else {
+      // Unirse al grupo
+      group.members.push(userId);
+      await group.save();
+      
+      console.log(`✅ ${req.user.username} se unió al grupo: ${group.name}`);
+      
+      res.json({
+        joined: true,
+        memberCount: group.members.length,
+        message: `Te has unido al grupo ${group.name}`
+      });
+    }
   } catch (error) {
-    console.error('❌ Error listando grupos:', error);
+    console.error('❌ Error en unirse/salir del grupo:', error);
     res.status(500).json({ 
-      message: 'Error listando grupos.',
+      message: 'Error al procesar solicitud del grupo.',
+      error: error.message 
+    });
+  }
+});
+
+// 🔹 Actualizar grupo (solo admins)
+app.put('/api/groups/:slug', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { name, description, image } = req.body;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    // Verificar que el usuario sea admin
+    const isAdmin = group.admins.some(
+      adminId => adminId.toString() === req.user._id.toString()
+    );
+
+    if (!isAdmin) {
+      return res.status(403).json({ message: 'Solo los administradores pueden editar el grupo.' });
+    }
+
+    // Actualizar campos
+    if (name && name.trim()) {
+      group.name = name.trim();
+      // Regenerar slug si cambió el nombre
+      group.slug = name.toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    }
+    if (description !== undefined) group.description = description.trim();
+    if (image !== undefined) group.image = image.trim();
+
+    await group.save();
+
+    console.log('✅ Grupo actualizado:', group.name);
+
+    res.json({
+      message: 'Grupo actualizado correctamente',
+      group
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando grupo:', error);
+    res.status(500).json({ 
+      message: 'Error al actualizar grupo.',
+      error: error.message 
+    });
+  }
+});
+
+// 🔹 Eliminar grupo (solo creador)
+app.delete('/api/groups/:slug', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    // Verificar que el usuario sea el creador
+    if (group.createdBy.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Solo el creador puede eliminar el grupo.' });
+    }
+
+    await Group.findByIdAndDelete(group._id);
+
+    console.log('✅ Grupo eliminado:', group.name);
+
+    res.json({ message: 'Grupo eliminado correctamente' });
+  } catch (error) {
+    console.error('❌ Error eliminando grupo:', error);
+    res.status(500).json({ 
+      message: 'Error al eliminar grupo.',
       error: error.message 
     });
   }
@@ -1870,7 +2825,11 @@ app.get('/api/groups/:slug/posts', ensureAuthenticated, async (req, res) => {
     const group = await Group.findOne({ slug })
       .populate({
         path: 'posts',
-        populate: { path: 'author', select: 'username profilePic' }
+        populate: { 
+          path: 'author', 
+          select: 'username profilePic' 
+        },
+        options: { sort: { createdAt: -1 } }
       })
       .lean();
 
@@ -1878,6 +2837,7 @@ app.get('/api/groups/:slug/posts', ensureAuthenticated, async (req, res) => {
       return res.status(404).json({ message: 'Grupo no encontrado.' });
     }
 
+    console.log(`📸 ${group.posts?.length || 0} posts del grupo encontrados`);
     res.json(group.posts || []);
   } catch (error) {
     console.error('❌ Error obteniendo posts del grupo:', error);
@@ -1910,12 +2870,16 @@ app.post('/api/groups/:slug/posts', ensureAuthenticated, uploadPostMedia.array('
 
     const images = (req.files || []).map(f => f.path);
 
+    if (!caption.trim() && images.length === 0) {
+      return res.status(400).json({ message: 'El post debe tener texto o al menos una imagen.' });
+    }
+
     const post = await Post.create({
       author: req.user._id,
       caption: caption.trim(),
       images,
       visibility,
-      groupId: group._id
+      groupId: group._id // Importante: relacionar el post con el grupo
     });
 
     // Agregar post al grupo
@@ -1923,6 +2887,14 @@ app.post('/api/groups/:slug/posts', ensureAuthenticated, uploadPostMedia.array('
     await group.save();
 
     const populated = await post.populate('author', 'username profilePic');
+
+    // Emitir evento de socket
+    if (global.io) {
+      global.io.emit('group-post-created', { 
+        groupSlug: slug, 
+        post: populated 
+      });
+    }
 
     console.log('✅ Post creado en grupo:', group.name);
 
@@ -2052,6 +3024,147 @@ app.post('/api/groups/:slug/admins/:userId', ensureAuthenticated, async (req, re
       message: 'Error al gestionar administrador.',
       error: error.message 
     });
+  }
+});
+
+// 🔹 Buscar grupos
+app.get('/api/groups/search', ensureAuthenticated, async (req, res) => {
+  try {
+    const query = (req.query.q || '').trim();
+
+    if (!query) {
+      return res.status(400).json({ message: 'Se requiere un término de búsqueda.' });
+    }
+
+    console.log('🔍 Buscando grupos:', query);
+
+    const groups = await Group.find({
+      $or: [
+        { name: { $regex: query, $options: 'i' } },
+        { description: { $regex: query, $options: 'i' } }
+      ]
+    })
+      .select('name slug description image members createdAt')
+      .limit(20)
+      .lean();
+
+    const groupsWithInfo = groups.map(group => ({
+      ...group,
+      memberCount: group.members?.length || 0,
+      isMember: group.members?.some(m => m.toString() === req.user._id.toString())
+    }));
+
+    console.log(`✅ ${groupsWithInfo.length} grupos encontrados`);
+    res.json(groupsWithInfo);
+  } catch (error) {
+    console.error('❌ Error buscando grupos:', error);
+    res.status(500).json({ message: 'Error buscando grupos.' });
+  }
+});
+
+// 🔹 Obtener grupos del usuario (donde es miembro)
+app.get('/api/users/me/groups', ensureAuthenticated, async (req, res) => {
+  try {
+    const groups = await Group.find({ members: req.user._id })
+      .populate('createdBy', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const groupsWithInfo = groups.map(group => ({
+      ...group,
+      memberCount: group.members?.length || 0,
+      isAdmin: group.admins?.some(a => a.toString() === req.user._id.toString())
+    }));
+
+    console.log(`👥 ${groupsWithInfo.length} grupos del usuario`);
+    res.json(groupsWithInfo);
+  } catch (error) {
+    console.error('❌ Error obteniendo grupos del usuario:', error);
+    res.status(500).json({ message: 'Error obteniendo grupos.' });
+  }
+});
+
+// 🔹 Obtener grupos donde el usuario es admin
+app.get('/api/users/me/admin-groups', ensureAuthenticated, async (req, res) => {
+  try {
+    const groups = await Group.find({ admins: req.user._id })
+      .populate('createdBy', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const groupsWithInfo = groups.map(group => ({
+      ...group,
+      memberCount: group.members?.length || 0
+    }));
+
+    console.log(`⚡ ${groupsWithInfo.length} grupos administrados`);
+    res.json(groupsWithInfo);
+  } catch (error) {
+    console.error('❌ Error obteniendo grupos administrados:', error);
+    res.status(500).json({ message: 'Error obteniendo grupos.' });
+  }
+});
+
+// 🔹 Obtener miembros de un grupo
+app.get('/api/groups/:slug/members', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    const group = await Group.findOne({ slug })
+      .populate('members', 'username profilePic status bio')
+      .populate('admins', 'username profilePic')
+      .lean();
+
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    // Marcar quiénes son admins
+    const members = group.members.map(member => ({
+      ...member,
+      isAdmin: group.admins.some(admin => admin._id.toString() === member._id.toString())
+    }));
+
+    res.json(members);
+  } catch (error) {
+    console.error('❌ Error obteniendo miembros:', error);
+    res.status(500).json({ message: 'Error obteniendo miembros.' });
+  }
+});
+
+// 🔹 Expulsar miembro del grupo (solo admins)
+app.delete('/api/groups/:slug/members/:userId', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug, userId } = req.params;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+
+    // Verificar que el usuario sea admin
+    const isAdmin = group.admins.some(
+      adminId => adminId.toString() === req.user._id.toString()
+    );
+
+    if (!isAdmin) {
+      return res.status(403).json({ message: 'Solo los administradores pueden expulsar miembros.' });
+    }
+
+    // No se puede expulsar al creador
+    if (group.createdBy.toString() === userId) {
+      return res.status(400).json({ message: 'No se puede expulsar al creador del grupo.' });
+    }
+
+    group.members.pull(userId);
+    group.admins.pull(userId); // También remover de admins si lo era
+    await group.save();
+
+    console.log('👋 Miembro expulsado del grupo');
+    res.json({ message: 'Miembro expulsado correctamente', memberCount: group.members.length });
+  } catch (error) {
+    console.error('❌ Error expulsando miembro:', error);
+    res.status(500).json({ message: 'Error expulsando miembro.' });
   }
 });
 
