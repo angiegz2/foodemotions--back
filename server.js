@@ -673,7 +673,7 @@ app.post('/recipes', async (req, res) => {
 });
 
 // ============================================================
-// 🤖 MODELOS DE IA (Chat, Traducción y Voz)
+// 🤖 MODELOS DE IA (Chat y Traducción)
 // ============================================================
 env.cacheDir = "./models_cache";
 env.allowLocalModels = true;
@@ -681,11 +681,11 @@ env.useBrowserCache = false;
 
 let chatPipeline = null;
 let translatePipeline = null;
-let ttsPipeline = null;
 
 (async () => {
   try {
     console.log("Cargando modelo de conversación (TinyLlama-1.1B)...");
+
     chatPipeline = await pipeline(
       "text-generation",
       "Xenova/TinyLlama-1.1B-Chat-v1.0"
@@ -699,23 +699,23 @@ let ttsPipeline = null;
     );
     console.log("✅ Modelo de traducción cargado correctamente.");
 
-    console.log("Cargando modelo de voz (SpeechT5-TTS)...");
-    ttsPipeline = await pipeline("text-to-speech", "Xenova/speecht5_tts", {
-      vocoder: "Xenova/unet_vocoder",
-    });
-    console.log("✅ Modelo de voz cargado correctamente.");
   } catch (err) {
     console.error("❌ Error inicializando modelos:", err.message);
   }
 })();
 
+// ============================================================
+// 🌍 Traducción automática local
+// ============================================================
 async function localTranslate(text, to = "eng_Latn") {
   try {
     if (!translatePipeline) return text;
+
     const res = await translatePipeline(text, {
       tgt_lang: to,
-      src_lang: to === "eng_Latn" ? "spa_Latn" : "eng_Latn"
+      src_lang: to === "eng_Latn" ? "spa_Latn" : "eng_Latn",
     });
+
     return res?.[0]?.translation_text || text;
   } catch (err) {
     console.warn("Falló traducción local:", err.message);
@@ -723,15 +723,23 @@ async function localTranslate(text, to = "eng_Latn") {
   }
 }
 
+// ============================================================
+// 😶‍🌫️ Detección emocional sencilla
+// ============================================================
 function detectEmotion(text) {
   const t = (text || "").toLowerCase();
+
   if (/(feliz|contento|alegre|animado|genial|excelente)/.test(t)) return "happy";
   if (/(triste|mal|deprimido|solo|llorar)/.test(t)) return "sad";
   if (/(enojado|molesto|furioso|rabia|odio)/.test(t)) return "angry";
   if (/(tranquilo|relajado|en paz|calmado|sereno)/.test(t)) return "calm";
+
   return "neutral";
 }
 
+// ============================================================
+// 🎭 Prompt según el modo seleccionado
+// ============================================================
 function getRolePrompt(mode) {
   switch (mode) {
     case "chef":
@@ -745,16 +753,23 @@ function getRolePrompt(mode) {
   }
 }
 
+// ============================================================
+// 🧠 Generación local con TinyLlama (con historial y traducción)
+// ============================================================
 async function generateSpanishReply({ message, mode, history = [] }) {
   try {
     if (!chatPipeline || !translatePipeline) {
       return "Los modelos aún se están cargando, inténtalo en unos segundos.";
     }
 
+    // 1. Entrada → Inglés
     const englishInput = await localTranslate(message, "eng_Latn");
+
+    // 2. Prompt según el modo
     const rolePrompt = getRolePrompt(mode);
     let prompt = `<|system|>\n${rolePrompt}</s>\n`;
-    
+
+    // 3. Añadir historial corto
     const recentHistory = history.slice(-3);
     for (const msg of recentHistory) {
       if (msg.role === "user") {
@@ -763,29 +778,35 @@ async function generateSpanishReply({ message, mode, history = [] }) {
         prompt += `<|assistant|>\n${msg.text}</s>\n`;
       }
     }
-    
+
+    // 4. Entrada actual
     prompt += `<|user|>\n${englishInput}</s>\n<|assistant|>\n`;
 
+    // 5. Generar respuesta con TinyLlama
     const gen = await chatPipeline(prompt, {
       max_new_tokens: 80,
       temperature: 0.7,
       top_p: 0.9,
       repetition_penalty: 1.2,
-      return_full_text: false
+      return_full_text: false,
     });
 
     let replyEn = gen?.[0]?.generated_text || "";
+
+    // Limpieza del texto
     replyEn = replyEn
       .replace(/<\|system\|>|<\|user\|>|<\|assistant\|>|<\/s>/g, "")
       .replace(/^(Assistant:|Roy:)/i, "")
-      .split('\n')[0]
+      .split("\n")[0]
       .trim();
-    
+
     if (replyEn.length > 500) {
       replyEn = replyEn.substring(0, 500).trim();
     }
 
+    // 6. Traducción final al español
     const replyEs = await localTranslate(replyEn, "spa_Latn");
+
     return replyEs.trim() || "Lo siento, no pude generar una respuesta adecuada.";
   } catch (err) {
     console.error("Error en generación:", err.message);
@@ -794,90 +815,50 @@ async function generateSpanishReply({ message, mode, history = [] }) {
 }
 
 // ============================================================
-// 💬 ENDPOINTS DE CHAT
+// 💬 ENDPOINT CHAT (solo texto)
 // ============================================================
 app.post("/api/chat", async (req, res) => {
   try {
     if (!chatPipeline || !translatePipeline) {
-      return res.status(503).json({ 
+      return res.status(503).json({
         error: "Modelos cargando...",
-        message: "Los modelos de IA se están inicializando. Espera unos segundos."
+        message: "Los modelos de IA se están inicializando. Espera unos segundos.",
       });
     }
 
     const { message, mode = "general" } = req.body || {};
-    
+
     if (!message || !message.trim()) {
       return res.status(400).json({ error: "Mensaje vacío" });
     }
 
-    const reply = await generateSpanishReply({ 
-      message: message.trim(), 
-      mode 
+    const reply = await generateSpanishReply({
+      message: message.trim(),
+      mode,
     });
-    
+
     const emotion = detectEmotion(message);
 
     console.log(`Roy (${mode}): ${reply.substring(0, 100)}...`);
-    
-    res.json({ 
-      reply, 
-      emotion,
-      mode,
-      timestamp: new Date().toISOString()
-    });
-  } catch (err) {
-    console.error("Error en chat:", err);
-    res.status(500).json({ 
-      error: "Error en el servidor del chat Roy.",
-      details: err.message 
-    });
-  }
-});
-
-app.post("/api/chat/voice", async (req, res) => {
-  try {
-    if (!chatPipeline || !translatePipeline || !ttsPipeline) {
-      return res.status(503).json({
-        error: "Modelos cargando...",
-        message: "Espera a que se inicialicen los modelos de IA y voz.",
-      });
-    }
-
-    const { message, mode = "general" } = req.body || {};
-    if (!message || !message.trim()) {
-      return res.status(400).json({ error: "Mensaje vacío" });
-    }
-
-    const reply = await generateSpanishReply({ message: message.trim(), mode });
-    const emotion = detectEmotion(message);
-
-    console.log("🎙️ Generando voz para la respuesta...");
-    const audioResult = await ttsPipeline(reply);
-    const audioBase64 = audioResult.audio[0];
-    const audioBuffer = Buffer.from(audioBase64, "base64");
-
-    const audioPath = path.resolve(`./audio_${Date.now()}.wav`);
-    fs.writeFileSync(audioPath, audioBuffer);
 
     res.json({
       reply,
       emotion,
       mode,
-      audioUrl: `/audio/${path.basename(audioPath)}`,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
-    console.error("❌ Error en /api/chat/voice:", err);
+    console.error("Error en chat:", err);
     res.status(500).json({
-      error: "Error generando respuesta con voz.",
+      error: "Error en el servidor del chat Roy.",
       details: err.message,
     });
   }
 });
 
-app.use("/audio", express.static(path.resolve("./")));
-
+// ============================================================
+// 💬 ENDPOINT CHAT CON HISTORIAL
+// ============================================================
 app.post("/api/chats/:id/message", async (req, res) => {
   try {
     if (!chatPipeline || !translatePipeline) {
@@ -885,7 +866,7 @@ app.post("/api/chats/:id/message", async (req, res) => {
     }
 
     const { message, mode = "general" } = req.body || {};
-    
+
     if (!message?.trim()) {
       return res.status(400).json({ error: "Mensaje vacío" });
     }
@@ -893,42 +874,45 @@ app.post("/api/chats/:id/message", async (req, res) => {
     const chat = await ChatSession.findById(req.params.id);
     if (!chat) return res.status(404).json({ error: "Conversación no encontrada." });
 
-    const reply = await generateSpanishReply({ 
-      message: message.trim(), 
+    const reply = await generateSpanishReply({
+      message: message.trim(),
       mode,
-      history: chat.messages 
+      history: chat.messages,
     });
-    
+
     const emotion = detectEmotion(message);
 
     chat.messages.push({ role: "user", text: message.trim() });
     chat.messages.push({ role: "assistant", text: reply });
     await chat.save();
 
-    res.json({ 
-      reply, 
-      emotion, 
+    res.json({
+      reply,
+      emotion,
       mode,
       chatId: chat._id,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   } catch (err) {
     console.error("Error en chat con historial:", err);
-    res.status(500).json({ 
+    res.status(500).json({
       error: "No se pudo procesar el mensaje.",
-      details: err.message 
+      details: err.message,
     });
   }
 });
 
+// ============================================================
+// 🟢 STATUS DE MODELOS
+// ============================================================
 app.get("/api/status", (req, res) => {
   res.json({
     status: chatPipeline && translatePipeline ? "ready" : "loading",
     models: {
       chat: chatPipeline ? "loaded" : "loading",
       translate: translatePipeline ? "loaded" : "loading",
-      tts: ttsPipeline ? "loaded" : "loading"
-    }
+      tts: "disabled", // ya no existe
+    },
   });
 });
 
