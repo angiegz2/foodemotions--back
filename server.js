@@ -17,6 +17,8 @@ import fs from "fs";
 import path from "path";
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
+import twilio from 'twilio';
+import nodemailer from 'nodemailer';
 
 dotenv.config();
 const app = express();
@@ -80,6 +82,18 @@ const backgroundStorage = new CloudinaryStorage({
 });
 const uploadBackground = multer({ storage: backgroundStorage });
 
+const transporter = nodemailer.createTransport({
+  service: 'gmail', // o 'outlook', 'yahoo', etc.
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
+
+if (!process.env.TWILIO_SID || !process.env.TWILIO_AUTH || !process.env.TWILIO_PHONE) {
+  console.warn('⚠️ Twilio no configurado. SMS deshabilitado.');
+}
+
 // ============================================================
 // 📦 MODELOS MONGOOSE — FoodEmotions Social + Chat + IA
 // ============================================================
@@ -104,6 +118,10 @@ const usuarioSchema = new mongoose.Schema({
     enum: ['Online', 'Away', 'Busy', 'Offline'],
     default: "Offline" 
   },
+
+  // ⭐ CAMPOS PARA RECUPERAR CONTRASEÑA
+  otpCode: { type: String },         // Código OTP temporal
+  otpExpires: { type: Date },        // Expiración del OTP
   
   followers: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
   following: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
@@ -118,19 +136,61 @@ const Usuario = mongoose.models.User || mongoose.model("User", usuarioSchema);
 // 📦 MODELO: Post
 // ==========================
 const postSchema = new mongoose.Schema({
-  author: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+
+  // Autor del post
+  author: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User', 
+    required: true 
+  },
+
   caption: { type: String, default: '' },
   images: [String],
-  likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+
+  likes: [{ 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User' 
+  }],
+
   comments: [{
-    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    user: { 
+      type: mongoose.Schema.Types.ObjectId, 
+      ref: 'User', 
+      required: true 
+    },
     text: String,
     createdAt: { type: Date, default: Date.now }
   }],
+
   tags: [String],
   location: String,
-  visibility: { type: String, enum: ['public', 'followers', 'private'], default: 'public' }
-}, { timestamps: true });
+
+  visibility: { 
+    type: String, 
+    enum: ['public', 'followers', 'private'], 
+    default: 'public' 
+  },
+
+  // ⚡ NUEVOS CAMPOS CORRECTAMENTE AGREGADOS
+  groupId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Group',
+    default: null 
+  },
+
+  edited: { 
+    type: Boolean, 
+    default: false 
+  },
+
+  editedAt: { 
+    type: Date 
+  }
+
+}, 
+{
+  timestamps: true   // ⏱ createdAt y updatedAt
+});
 
 const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
 
@@ -479,7 +539,7 @@ app.put('/profile/status', ensureAuthenticated, async (req, res) => {
   }
 });
 
-// AÑADIR ESTE ENDPOINT
+// BIOGRAFIA
 app.put('/api/users/me/bio', ensureAuthenticated, async (req, res) => {
   try {
     const { bio } = req.body;
@@ -541,6 +601,149 @@ app.post('/api/users/me/background', ensureAuthenticated, uploadBackground.singl
     });
   }
 });
+
+app.post('/api/auth/send-otp', async (req, res) => {
+  try {
+    const { email, telefono } = req.body;
+    let user = null;
+
+    if (email) {
+      user = await Usuario.findOne({ email });
+    } else if (telefono) {
+      user = await Usuario.findOne({ telefono });
+    }
+
+    if (!user) {
+      return res.status(404).json({ message: "No encontramos una cuenta con esos datos." });
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000);
+    user.otpCode = otp;
+    user.otpExpires = Date.now() + 10 * 60 * 1000;
+    await user.save();
+
+    console.log("🔑 OTP generado:", otp);
+
+    let smsEnviado = false;
+    let emailEnviado = false;
+
+    // SMS con Twilio
+    if (user.telefono && process.env.TWILIO_SID) {
+      try {
+        const client = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH);
+        await client.messages.create({
+          body: `Tu código OTP de FoodEmotions es: ${otp}`,
+          from: process.env.TWILIO_PHONE,
+          to: user.telefono
+        });
+        smsEnviado = true;
+      } catch (err) {
+        console.error("Error enviando SMS:", err.message);
+      }
+    }
+
+    // Email con Nodemailer
+    if (user.email && process.env.EMAIL_USER) {
+      try {
+        await transporter.sendMail({
+          to: user.email,
+          subject: "Código de recuperación - FoodEmotions",
+          html: `
+            <div style="font-family: sans-serif; padding: 20px;">
+              <h2 style="color:#425638;">Código de verificación</h2>
+              <h1 style="font-size: 36px; color:#687450;">${otp}</h1>
+              <p>Este código expirará en 10 minutos.</p>
+            </div>
+          `
+        });
+        emailEnviado = true;
+      } catch (err) {
+        console.error("Error enviando email:", err.message);
+      }
+    }
+
+    res.json({
+      message: "Se envió el código OTP.",
+      smsEnviado,
+      emailEnviado,
+      dev_otp: otp // ELIMINAR en producción
+    });
+
+  } catch (error) {
+    console.error("Error enviando OTP:", error);
+    res.status(500).json({ message: "Error interno del servidor." });
+  }
+});
+
+app.post('/api/auth/verify-otp', async (req, res) => {
+  try {
+    const { email, telefono, otp } = req.body;
+
+    let user = null;
+
+    if (email) {
+      user = await Usuario.findOne({ email });
+    } else if (telefono) {
+      user = await Usuario.findOne({ telefono });
+    }
+
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado." });
+    }
+
+    if (!user.otpCode || user.otpCode != otp) {
+      return res.status(400).json({ message: "Código incorrecto." });
+    }
+
+    if (user.otpExpires < Date.now()) {
+      return res.status(400).json({ message: "El código ha expirado." });
+    }
+
+    res.json({
+      message: "OTP validado. Continúa al cambio de contraseña.",
+      allowed: true
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error al verificar OTP." });
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { email, telefono, newPassword } = req.body;
+
+    let user = null;
+
+    if (email) {
+      user = await Usuario.findOne({ email });
+    } else if (telefono) {
+      user = await Usuario.findOne({ telefono });
+    }
+
+    if (!user) {
+      return res.status(404).json({ message: "Usuario no encontrado." });
+    }
+
+    // Limpiar OTP
+    user.otpCode = undefined;
+    user.otpExpires = undefined;
+
+    // Hash contraseña (ESM)
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(newPassword, salt);
+
+    await user.save();
+
+    res.json({ message: "Contraseña actualizada exitosamente." });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error al cambiar contraseña." });
+  }
+});
+
 
 // 🌐 Actualizar background desde URL
 app.put('/api/users/me/background-url', ensureAuthenticated, async (req, res) => {
@@ -2502,6 +2705,24 @@ const groupSchema = new mongoose.Schema({
   admins: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   posts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Post' }],
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  
+  // ⚡ NUEVOS CAMPOS
+  pinnedPosts: [{ 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'Post',
+    default: [] 
+  }],
+  isPrivate: { 
+    type: Boolean, 
+    default: false 
+  },
+  rules: { 
+    type: String, 
+    default: '' 
+  },
+  tags: [{ 
+    type: String 
+  }]
 }, { timestamps: true });
 
 const Group = mongoose.models.Group || mongoose.model('Group', groupSchema);
@@ -2657,11 +2878,11 @@ app.post('/api/groups/:slug/join', ensureAuthenticated, async (req, res) => {
     let group = await Group.findOne({ slug });
 
     if (!group) {
-      // Solo crear automáticamente el grupo "royal-ui-force"
-      if (slug === 'royal-ui-force') {
+      // Solo crear automáticamente el grupo "food-emotions-team"
+      if (slug === 'food-emotions-team') {
         group = await Group.create({
-          name: 'ROYAL UI FORCE',
-          slug: 'royal-ui-force',
+          name: 'FOOD EMOTIONS TEAM',
+          slug: 'food-emotions-team',
           description: 'Comunidad oficial de desarrolladores creativos',
           image: 'https://res.cloudinary.com/demo/image/upload/sample.jpg',
           members: [userId],
@@ -2669,7 +2890,7 @@ app.post('/api/groups/:slug/join', ensureAuthenticated, async (req, res) => {
           createdBy: userId,
           posts: []
         });
-        console.log('✨ Grupo "royal-ui-force" creado automáticamente');
+        console.log('✨ Grupo "food-emotions-team" creado automáticamente');
         
         return res.json({
           joined: true,
@@ -3149,6 +3370,213 @@ app.delete('/api/groups/:slug/members/:userId', ensureAuthenticated, async (req,
   } catch (error) {
     console.error('❌ Error expulsando miembro:', error);
     res.status(500).json({ message: 'Error expulsando miembro.' });
+  }
+});
+
+// 🔹 Eliminar publicación del grupo (autor o admin)
+app.delete('/api/groups/:slug/posts/:postId', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug, postId } = req.params;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+    
+    const post = await Post.findById(postId);
+    if (!post) {
+      return res.status(404).json({ message: 'Publicación no encontrada.' });
+    }
+    
+    // Verificar que sea el autor o admin
+    const isAuthor = post.author.toString() === req.user._id.toString();
+    const isAdmin = group.admins.some(
+      adminId => adminId.toString() === req.user._id.toString()
+    );
+    
+    if (!isAuthor && !isAdmin) {
+      return res.status(403).json({ message: 'No tienes permiso para eliminar esta publicación.' });
+    }
+    
+    // Eliminar post del grupo
+    group.posts.pull(postId);
+    await group.save();
+    
+    // Eliminar post de la base de datos
+    await Post.findByIdAndDelete(postId);
+    
+    console.log('🗑️ Publicación eliminada del grupo:', group.name);
+    res.json({ message: 'Publicación eliminada correctamente' });
+    
+  } catch (error) {
+    console.error('❌ Error eliminando publicación:', error);
+    res.status(500).json({ message: 'Error al eliminar publicación.' });
+  }
+});
+
+// 🔹 Editar publicación del grupo (solo autor)
+app.put('/api/groups/:slug/posts/:postId', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug, postId } = req.params;
+    const { caption } = req.body;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+    
+    const post = await Post.findById(postId);
+    if (!post) {
+      return res.status(404).json({ message: 'Publicación no encontrada.' });
+    }
+    
+    // Verificar que sea el autor
+    if (post.author.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Solo el autor puede editar esta publicación.' });
+    }
+    
+    post.caption = caption.trim();
+    post.edited = true;
+    post.editedAt = Date.now();
+    await post.save();
+    
+    const populated = await post.populate('author', 'username profilePic');
+    
+    console.log('✏️ Publicación editada en grupo:', group.name);
+    res.json({ message: 'Publicación editada correctamente', post: populated });
+    
+  } catch (error) {
+    console.error('❌ Error editando publicación:', error);
+    res.status(500).json({ message: 'Error al editar publicación.' });
+  }
+});
+
+// 🔹 Fijar/Desfijar publicación (solo admins)
+app.post('/api/groups/:slug/posts/:postId/pin', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug, postId } = req.params;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+    
+    // Verificar que sea admin
+    const isAdmin = group.admins.some(
+      adminId => adminId.toString() === req.user._id.toString()
+    );
+    
+    if (!isAdmin) {
+      return res.status(403).json({ message: 'Solo los administradores pueden fijar publicaciones.' });
+    }
+    
+    // Inicializar pinnedPosts si no existe
+    if (!group.pinnedPosts) {
+      group.pinnedPosts = [];
+    }
+    
+    const isPinned = group.pinnedPosts.some(id => id.toString() === postId);
+    
+    if (isPinned) {
+      // Desfijar
+      group.pinnedPosts = group.pinnedPosts.filter(id => id.toString() !== postId);
+      await group.save();
+      res.json({ pinned: false, message: 'Publicación desfijada' });
+    } else {
+      // Fijar (máximo 3 posts fijados)
+      if (group.pinnedPosts.length >= 3) {
+        return res.status(400).json({ message: 'Máximo 3 publicaciones fijadas permitidas.' });
+      }
+      group.pinnedPosts.push(postId);
+      await group.save();
+      res.json({ pinned: true, message: 'Publicación fijada' });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error fijando publicación:', error);
+    res.status(500).json({ message: 'Error al fijar publicación.' });
+  }
+});
+
+// 🔹 Obtener actividad reciente del grupo
+app.get('/api/groups/:slug/activity', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { limit = 20 } = req.query;
+    
+    const group = await Group.findOne({ slug });
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+    
+    // Obtener actividad reciente
+    const activity = [];
+    
+    // Publicaciones recientes
+    const recentPosts = await Post.find({
+      groupId: group._id
+    })
+      .populate('author', 'username profilePic')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit));
+    
+    recentPosts.forEach(post => {
+      activity.push({
+        type: 'new_post',
+        user: post.author,
+        post: post,
+        timestamp: post.createdAt,
+        message: `${post.author.username} publicó en el grupo`
+      });
+    });
+    
+    res.json(activity);
+    
+  } catch (error) {
+    console.error('❌ Error obteniendo actividad:', error);
+    res.status(500).json({ message: 'Error al obtener actividad.' });
+  }
+});
+
+// 🔹 Obtener estadísticas detalladas del grupo
+app.get('/api/groups/:slug/stats', ensureAuthenticated, async (req, res) => {
+  try {
+    const { slug } = req.params;
+    
+    const group = await Group.findOne({ slug })
+      .populate('members', '_id')
+      .populate('admins', '_id')
+      .populate('posts');
+    
+    if (!group) {
+      return res.status(404).json({ message: 'Grupo no encontrado.' });
+    }
+    
+    // Calcular estadísticas
+    const totalLikes = group.posts.reduce((sum, post) => {
+      return sum + (post.likes?.length || 0);
+    }, 0);
+    
+    const totalComments = group.posts.reduce((sum, post) => {
+      return sum + (post.comments?.length || 0);
+    }, 0);
+    
+    const stats = {
+      memberCount: group.members.length,
+      adminCount: group.admins.length,
+      postCount: group.posts.length,
+      totalLikes,
+      totalComments,
+      avgLikesPerPost: group.posts.length > 0 ? (totalLikes / group.posts.length).toFixed(1) : 0,
+      avgCommentsPerPost: group.posts.length > 0 ? (totalComments / group.posts.length).toFixed(1) : 0,
+    };
+    
+    console.log('📊 Estadísticas del grupo:', group.name);
+    res.json(stats);
+    
+  } catch (error) {
+    console.error('❌ Error obteniendo estadísticas:', error);
+    res.status(500).json({ message: 'Error al obtener estadísticas.' });
   }
 });
 
