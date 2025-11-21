@@ -1199,7 +1199,7 @@ app.get('/api/user/me', async (req, res) => {
     }
     
     const user = await Usuario.findById(req.user._id)
-      .select('username email telefono profilePic bio status followers following savedPosts recipesLiked isPremium')
+      .select('username email bannerImage telefono profilePic bio status followers following savedPosts recipesLiked isPremium')
       .lean();
     
     if (!user) {
@@ -1370,6 +1370,29 @@ app.get('/api/users/nearby', ensureAuthenticated, async (req, res) => {
   } catch (err) {
     console.error('❌ Error buscando usuarios cercanos:', err);
     res.status(500).json({ message: 'Error buscando usuarios cercanos.' });
+  }
+});
+
+// ============================================================
+// 👥 User Suggestions - GET /api/users/suggestions
+// ============================================================
+
+app.get("/api/users/suggestions", ensureAuthenticated, async (req, res) => {
+  try {
+    const currentUserId = req.user._id;
+
+    // Buscar usuarios menos el actual
+    const users = await Usuario.find({
+      _id: { $ne: currentUserId }
+    })
+      .select("username profilePic bio")
+      .limit(5);
+
+    return res.json(users);
+
+  } catch (err) {
+    console.error("❌ Error al obtener sugerencias:", err);
+    return res.status(500).json({ message: "Error al cargar sugerencias" });
   }
 });
 
@@ -4137,7 +4160,6 @@ app.get('/api/users/:id/posts', ensureAuthenticated, async (req, res) => {
 // 🔔 SISTEMA DE NOTIFICACIONES MEJORADO
 // ============================================================
 
-// Función helper para crear notificaciones
 async function createNotification(recipientId, senderId, type, message, entityId = null) {
   try {
     // No crear notificación si el usuario se interactúa consigo mismo
