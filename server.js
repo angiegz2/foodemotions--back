@@ -3836,13 +3836,18 @@ app.post('/api/messages/start', ensureAuthenticated, async (req, res) => {
 app.get('/api/messages/:userId', ensureAuthenticated, async (req, res) => {
   try {
     const { userId } = req.params;
-    const currentUser = req.user._id;
+    const currentUserId = req.user._id;
+
     const messages = await Message.find({
       $or: [
-        { sender: currentUser, recipient: userId },
-        { sender: userId, recipient: currentUser },
+        { sender: currentUserId, recipient: userId },
+        { sender: userId, recipient: currentUserId },
       ],
-    }).sort({ createdAt: 1 });
+    })
+      .sort({ createdAt: 1 })
+      .populate('sender', 'username profilePic')   // 👈 importante para el front
+      .populate('recipient', 'username profilePic');
+
     res.json(messages);
   } catch (err) {
     console.error('❌ Error obteniendo mensajes:', err);
@@ -3852,17 +3857,53 @@ app.get('/api/messages/:userId', ensureAuthenticated, async (req, res) => {
 
 app.post('/api/messages/send', ensureAuthenticated, async (req, res) => {
   try {
-    const { recipientId, text } = req.body;
-    if (!recipientId || !text) return res.status(400).json({ message: 'Datos incompletos.' });
+    const { recipientId, text = '', fileUrl, type = 'text' } = req.body;
 
-    const msg = new Message({ sender: req.user._id, recipient: recipientId, text });
+    if (!recipientId) {
+      return res.status(400).json({ message: 'Falta el destinatario (recipientId).' });
+    }
+
+    const trimmedText = text.trim();
+    if (!trimmedText && !fileUrl) {
+      return res.status(400).json({ message: 'El mensaje debe tener texto o un archivo.' });
+    }
+
+    const msg = new Message({
+      sender: req.user._id,
+      recipient: recipientId,
+      text: trimmedText,
+      fileUrl: fileUrl || undefined,
+      type: fileUrl ? (type || 'image') : 'text',
+    });
+
     await msg.save();
-    res.status(201).json({ message: 'Mensaje enviado.', data: msg });
+
+    const populated = await Message.findById(msg._id)
+      .populate('sender', 'username profilePic')
+      .populate('recipient', 'username profilePic');
+
+    // ⚡ Emitir en tiempo real
+    const io = global.io;   // ya lo tienes definido
+
+    if (io && populated) {
+      const senderId = String(populated.sender._id);
+      const receiverId = String(populated.recipient._id);
+
+      // Rooms por usuario → notifica tanto al emisor como al receptor
+      io.to(`user:${senderId}`).emit('new-message', populated);
+      io.to(`user:${receiverId}`).emit('new-message', populated);
+    }
+
+    return res.status(201).json({
+      message: 'Mensaje enviado.',
+      data: populated,
+    });
   } catch (err) {
     console.error('❌ Error enviando mensaje:', err);
     res.status(500).json({ message: 'Error enviando mensaje.' });
   }
 });
+
 
 // ============================================================
 // 🗑️ ELIMINAR MENSAJES
@@ -4673,13 +4714,8 @@ app.get('/api/users/search', ensureAuthenticated, async (req, res) => {
   }
 });
 
-// ============================================================
-// ⚡ SOCKET.IO — COMENTARIOS, LIKES Y MENSAJES EN TIEMPO REAL
-// ============================================================
-// crea http server
 const httpServer = http.createServer(app);
 
-// socket.io
 const io = new SocketIOServer(httpServer, {
   cors: {
     origin: process.env.CLIENT_URL || 'http://localhost:4321',
@@ -4688,10 +4724,61 @@ const io = new SocketIOServer(httpServer, {
 });
 global.io = io; // para usar io en rutas
 
+// Mapa opcional para saber quién está online (no es obligatorio, pero es útil)
+const onlineUsers = new Map(); // userId -> Set(socketId)
+
 io.on('connection', (socket) => {
-  // puedes agregar join por userId si quieres rooms
-  socket.on('disconnect', () => {});
+  console.log('🔌 Nuevo socket conectado:', socket.id);
+
+  // 1) Usuario se conecta (desde el frontend ya estás emitiendo 'user-connected')
+  socket.on('user-connected', (userId) => {
+    if (!userId) return;
+    const cleanId = String(userId).replace(/"/g, '');
+
+    if (!onlineUsers.has(cleanId)) {
+      onlineUsers.set(cleanId, new Set());
+    }
+    onlineUsers.get(cleanId).add(socket.id);
+
+    // Room por usuario
+    socket.join(`user:${cleanId}`);
+    console.log(`👤 Usuario ${cleanId} asociado al socket ${socket.id}`);
+  });
+
+  // 2) Entrada a un chat específico (room por conversación)
+  socket.on('join-chat', ({ userId, recipientId }) => {
+    if (!userId || !recipientId) return;
+    const room = getChatRoomName(userId, recipientId);
+    socket.join(room);
+    console.log(`💬 Socket ${socket.id} se unió a room ${room}`);
+  });
+
+  // 3) Salir de un chat específico
+  socket.on('leave-chat', ({ userId, recipientId }) => {
+    if (!userId || !recipientId) return;
+    const room = getChatRoomName(userId, recipientId);
+    socket.leave(room);
+    console.log(`↩️ Socket ${socket.id} salió de room ${room}`);
+  });
+
+  socket.on('disconnect', () => {
+    // Limpieza rápida
+    for (const [userId, sockets] of onlineUsers.entries()) {
+      sockets.delete(socket.id);
+      if (sockets.size === 0) {
+        onlineUsers.delete(userId);
+      }
+    }
+    console.log('❌ Socket desconectado:', socket.id);
+  });
 });
+
+// Helper para generar un nombre único de room por par de usuarios
+function getChatRoomName(userId1, userId2) {
+  const a = String(userId1).replace(/"/g, '');
+  const b = String(userId2).replace(/"/g, '');
+  return a < b ? `chat:${a}:${b}` : `chat:${b}:${a}`;
+}
 
 // ============================================================
 // ✅ INICIAR SERVIDOR CON SOCKET.IO
