@@ -3981,9 +3981,9 @@ app.get('/api/posts/feed', ensureAuthenticated, async (req, res) => {
     const limit = parseInt(req.query.limit ?? '10', 10);
     const filter = (req.query.filter ?? 'all');
 
-    const q = {}; // simple: todos los públicos
+    const q = {}; 
     if (filter === 'following') {
-      // solo posts de gente a la que sigo y públicos/seguidores
+
       const me = await Usuario.findById(req.user._id).select('following');
       q.author = { $in: me.following };
       q.visibility = { $in: ['public', 'followers'] };
